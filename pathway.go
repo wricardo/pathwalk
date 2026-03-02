@@ -8,9 +8,11 @@ import (
 
 // pathwayJSON mirrors the top-level structure of a pathway JSON file.
 type pathwayJSON struct {
-	Nodes           []nodeJSON `json:"nodes"`
-	Edges           []edgeJSON `json:"edges"`
-	GraphQLEndpoint string     `json:"graphqlEndpoint"`
+	Nodes            []nodeJSON `json:"nodes"`
+	Edges            []edgeJSON `json:"edges"`
+	GraphQLEndpoint  string     `json:"graphqlEndpoint"`
+	MaxTurns         int        `json:"maxTurns"`
+	MaxVisitsPerNode int        `json:"maxVisitsPerNode"`
 }
 
 type nodeJSON struct {
@@ -20,13 +22,13 @@ type nodeJSON struct {
 }
 
 type nodeDataJSON struct {
-	Name        string            `json:"name"`
-	Text        string            `json:"text"`
-	Prompt      string            `json:"prompt"`
-	IsStart     bool              `json:"isStart"`
-	IsGlobal    bool              `json:"isGlobal"`
-	GlobalLabel string            `json:"globalLabel"`
-	Condition   string            `json:"condition"`
+	Name        string `json:"name"`
+	Text        string `json:"text"`
+	Prompt      string `json:"prompt"`
+	IsStart     bool   `json:"isStart"`
+	IsGlobal    bool   `json:"isGlobal"`
+	GlobalLabel string `json:"globalLabel"`
+	Condition   string `json:"condition"`
 
 	// [[name, type, description, required], ...]
 	ExtractVars []json.RawMessage `json:"extractVars"`
@@ -44,6 +46,9 @@ type nodeDataJSON struct {
 	// Route fields
 	Routes         []routeRuleJSON `json:"routes"`
 	FallbackNodeID string          `json:"fallbackNodeId"`
+
+	// Per-node visit cap override (0 = use pathway default)
+	MaxVisits int `json:"maxVisits"`
 }
 
 type routeRuleJSON struct {
@@ -93,6 +98,13 @@ type Pathway struct {
 	StartNode       *Node
 	GlobalNodes     []*Node // nodes with IsGlobal == true and a non-empty GlobalLabel
 	GraphQLEndpoint string  // optional default GraphQL endpoint
+
+	// MaxTurns caps the total number of node-to-node transitions in a run.
+	// 0 means use the engine's WithMaxSteps value (default 50).
+	MaxTurns int
+	// MaxVisitsPerNode is the default per-node visit cap for all nodes in the pathway.
+	// 0 means no limit unless a node's own MaxVisits overrides it.
+	MaxVisitsPerNode int
 }
 
 // ParsePathway reads a pathway JSON file and returns a Pathway.
@@ -112,9 +124,11 @@ func ParsePathwayBytes(data []byte) (*Pathway, error) {
 	}
 
 	pp := &Pathway{
-		NodeByID:        make(map[string]*Node),
-		EdgesFrom:       make(map[string][]*Edge),
-		GraphQLEndpoint: raw.GraphQLEndpoint,
+		NodeByID:         make(map[string]*Node),
+		EdgesFrom:        make(map[string][]*Edge),
+		GraphQLEndpoint:  raw.GraphQLEndpoint,
+		MaxTurns:         raw.MaxTurns,
+		MaxVisitsPerNode: raw.MaxVisitsPerNode,
 	}
 
 	for _, rn := range raw.Nodes {
@@ -141,6 +155,8 @@ func ParsePathwayBytes(data []byte) (*Pathway, error) {
 
 			// Route
 			FallbackNodeID: rn.Data.FallbackNodeID,
+
+			MaxVisits: rn.Data.MaxVisits,
 		}
 
 		// Parse extractVars — each element is [name, type, description, required]

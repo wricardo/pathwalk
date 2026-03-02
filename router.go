@@ -49,6 +49,7 @@ func llmRoute(
 	edges []*Edge,
 	llm LLMClient,
 ) (string, string, error) {
+	ctx = WithNodeID(ctx, node.ID)
 	ctx = WithCallPurpose(ctx, "route")
 
 	// Build the list of available routes

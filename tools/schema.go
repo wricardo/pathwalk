@@ -34,10 +34,15 @@ func (t *GraphQLTool) queriesListTool() pathwalk.Tool {
 					"type":        "string",
 					"description": "Optional substring to filter query names",
 				},
+				"withDescription": map[string]any{
+					"type":        "boolean",
+					"description": "Include field descriptions as comments. Defaults to false.",
+				},
 			},
 		},
 		Fn: func(ctx context.Context, args map[string]any) (any, error) {
 			filter, _ := args["filter"].(string)
+			withDesc, _ := args["withDescription"].(bool)
 			const q = `{ __schema { queryType { fields {
 				name description
 				args { name type { ...TR } }
@@ -49,7 +54,7 @@ func (t *GraphQLTool) queriesListTool() pathwalk.Tool {
 				return nil, err
 			}
 			fields := extractFields(raw, "queryType")
-			return formatFieldList(fields, filter), nil
+			return formatFieldList(fields, filter, withDesc), nil
 		},
 	}
 }
@@ -66,10 +71,15 @@ func (t *GraphQLTool) mutationsListTool() pathwalk.Tool {
 					"type":        "string",
 					"description": "Optional substring to filter mutation names",
 				},
+				"withDescription": map[string]any{
+					"type":        "boolean",
+					"description": "Include field descriptions as comments. Defaults to false.",
+				},
 			},
 		},
 		Fn: func(ctx context.Context, args map[string]any) (any, error) {
 			filter, _ := args["filter"].(string)
+			withDesc, _ := args["withDescription"].(bool)
 			const q = `{ __schema { mutationType { fields {
 				name description
 				args { name type { ...TR } }
@@ -81,7 +91,7 @@ func (t *GraphQLTool) mutationsListTool() pathwalk.Tool {
 				return nil, err
 			}
 			fields := extractFields(raw, "mutationType")
-			return formatFieldList(fields, filter), nil
+			return formatFieldList(fields, filter, withDesc), nil
 		},
 	}
 }
@@ -98,16 +108,21 @@ func (t *GraphQLTool) typesListTool() pathwalk.Tool {
 					"type":        "string",
 					"description": "Optional substring to filter type names",
 				},
+				"withDescription": map[string]any{
+					"type":        "boolean",
+					"description": "Include type descriptions as comments. Defaults to false.",
+				},
 			},
 		},
 		Fn: func(ctx context.Context, args map[string]any) (any, error) {
 			filter, _ := args["filter"].(string)
+			withDesc, _ := args["withDescription"].(bool)
 			const q = `{ __schema { types { kind name description } } }`
 			raw, err := t.runIntrospection(ctx, q)
 			if err != nil {
 				return nil, err
 			}
-			return formatTypesList(raw, filter), nil
+			return formatTypesList(raw, filter, withDesc), nil
 		},
 	}
 }
@@ -242,7 +257,7 @@ func extractFields(data map[string]any, key string) []map[string]any {
 }
 
 // formatFieldList renders query/mutation fields as compact text.
-func formatFieldList(fields []map[string]any, filter string) string {
+func formatFieldList(fields []map[string]any, filter string, withDescription bool) string {
 	var b strings.Builder
 	for _, f := range fields {
 		name := strVal(f["name"])
@@ -269,18 +284,19 @@ func formatFieldList(fields []map[string]any, filter string) string {
 		}
 		sig += ": " + retType
 
-		desc := strVal(f["description"])
-		if desc != "" {
-			fmt.Fprintf(&b, "%s  # %s\n", sig, desc)
-		} else {
-			fmt.Fprintf(&b, "%s\n", sig)
+		if withDescription {
+			if desc := strVal(f["description"]); desc != "" {
+				fmt.Fprintf(&b, "%s  # %s\n", sig, desc)
+				continue
+			}
 		}
+		fmt.Fprintf(&b, "%s\n", sig)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
 // formatTypesList renders all named non-built-in, non-scalar types as compact text.
-func formatTypesList(data map[string]any, filter string) string {
+func formatTypesList(data map[string]any, filter string, withDescription bool) string {
 	if data == nil {
 		return "(no data)"
 	}
@@ -307,8 +323,10 @@ func formatTypesList(data map[string]any, filter string) string {
 			continue
 		}
 		line := fmt.Sprintf("%s (%s)", name, strings.ToLower(kind))
-		if desc := strVal(m["description"]); desc != "" {
-			line += "  # " + desc
+		if withDescription {
+			if desc := strVal(m["description"]); desc != "" {
+				line += "  # " + desc
+			}
 		}
 		fmt.Fprintln(&b, line)
 	}

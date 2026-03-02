@@ -89,6 +89,10 @@ type Node struct {
 	// Route node
 	Routes         []RouteRule
 	FallbackNodeID string
+
+	// MaxVisits caps how many times this node may be visited in a single run.
+	// 0 means use the pathway-level MaxVisitsPerNode default (or no limit).
+	MaxVisits int
 }
 
 // Message is a single turn in an LLM conversation.
@@ -131,14 +135,17 @@ type Step struct {
 
 // RunResult is the final result of running a pathway.
 type RunResult struct {
+	// Output is the last meaningful content produced by the run — the output
+	// of the last LLM or webhook step that executed before the terminal node.
+	// Terminal nodes do not contribute to Output.
 	Output    string
 	Variables map[string]any
 	Steps     []Step
 	// Reason explains why the run ended. Values: "terminal", "max_steps",
-	// "error", "dead_end", "missing_node".
+	// "error", "dead_end", "missing_node", "max_node_visits".
 	Reason string
-	// FailedNode is the name of the node that caused an error when
-	// Reason is "error". Empty otherwise.
+	// FailedNode is the name of the node that caused the run to stop when
+	// Reason is "error" or "max_node_visits". Empty otherwise.
 	FailedNode string
 }
 

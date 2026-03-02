@@ -72,7 +72,13 @@ func (e *Engine) Run(ctx context.Context, task string) (*RunResult, error) {
 	state := newState(task)
 	currentNode := e.pathway.StartNode
 
-	for step := 0; step < e.maxSteps; step++ {
+	// Pathway-level maxTurns overrides the engine default when set.
+	stepCap := e.maxSteps
+	if e.pathway.MaxTurns > 0 && e.pathway.MaxTurns < stepCap {
+		stepCap = e.pathway.MaxTurns
+	}
+
+	for step := 0; step < stepCap; step++ {
 		if currentNode == nil {
 			return &RunResult{
 				Output:    "",
@@ -100,6 +106,21 @@ func (e *Engine) Run(ctx context.Context, task string) (*RunResult, error) {
 
 		if e.verbose {
 			log.Printf("[step %d] node=%q type=%s", step+1, currentNode.Name, currentNode.Type)
+		}
+
+		// Enforce per-node visit cap.
+		state.VisitCounts[currentNode.ID]++
+		nodeVisitLimit := e.pathway.MaxVisitsPerNode
+		if currentNode.MaxVisits > 0 {
+			nodeVisitLimit = currentNode.MaxVisits
+		}
+		if nodeVisitLimit > 0 && state.VisitCounts[currentNode.ID] > nodeVisitLimit {
+			return &RunResult{
+				Variables:  state.Variables,
+				Steps:      state.Steps,
+				Reason:     "max_node_visits",
+				FailedNode: currentNode.Name,
+			}, nil
 		}
 
 		// Skip unsupported node types
@@ -156,8 +177,18 @@ func (e *Engine) Run(ctx context.Context, task string) (*RunResult, error) {
 			if e.verbose {
 				log.Printf("[end] %s\n%s", currentNode.Name, out.Text)
 			}
+			// Terminal nodes hold static text; the meaningful answer is in the
+			// last LLM/webhook step that ran before the terminal. Walk back
+			// through prior steps (skip the terminal we just appended) to find it.
+			output := out.Text
+			for i := len(state.Steps) - 2; i >= 0; i-- {
+				if state.Steps[i].Output != "" {
+					output = state.Steps[i].Output
+					break
+				}
+			}
 			return &RunResult{
-				Output:    out.Text,
+				Output:    output,
 				Variables: state.Variables,
 				Steps:     state.Steps,
 				Reason:    "terminal",

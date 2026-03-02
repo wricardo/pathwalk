@@ -1,0 +1,156 @@
+{
+  "graphqlEndpoint": "http://localhost:4000/graphql",
+  "nodes": [
+    {
+      "id": "start",
+      "type": "Default",
+      "data": {
+        "name": "Understand Request",
+        "isStart": true,
+        "prompt": "You are a pizzeria operations assistant. Analyze the task and determine which operation category it belongs to.\n\nCategories:\n- order_mgmt: creating orders, updating order status, listing/viewing orders\n- menu_mgmt: creating, listing, or deleting pizzas from the menu\n- inventory_mgmt: checking ingredient stock levels, restocking ingredients\n- reporting: dashboard statistics, revenue summaries, operational reports\n\nIdentify the operation type and briefly confirm your understanding of the request.",
+        "condition": "Exit when you have identified the operation type.",
+        "extractVars": [
+          ["operation_type", "string", "The category of operation: order_mgmt, menu_mgmt, inventory_mgmt, or reporting", true]
+        ],
+        "modelOptions": { "newTemperature": 0.1 }
+      },
+      "position": { "x": 400, "y": 0 }
+    },
+    {
+      "id": "route-op",
+      "type": "Route",
+      "data": {
+        "name": "Route to Handler",
+        "routes": [
+          {
+            "conditions": [{ "field": "operation_type", "value": "order_mgmt", "operator": "is" }],
+            "targetNodeId": "order-mgmt"
+          },
+          {
+            "conditions": [{ "field": "operation_type", "value": "menu_mgmt", "operator": "is" }],
+            "targetNodeId": "menu-mgmt"
+          },
+          {
+            "conditions": [{ "field": "operation_type", "value": "inventory_mgmt", "operator": "is" }],
+            "targetNodeId": "inventory-mgmt"
+          },
+          {
+            "conditions": [{ "field": "operation_type", "value": "reporting", "operator": "is" }],
+            "targetNodeId": "reporting"
+          }
+        ],
+        "fallbackNodeId": "end"
+      },
+      "position": { "x": 400, "y": 150 }
+    },
+    {
+      "id": "order-mgmt",
+      "type": "Default",
+      "data": {
+        "name": "Order Management",
+        "prompt": "You are managing orders for a pizzeria. Use the graphql tool to complete the requested operation.\n\nAvailable operations:\n- List orders: query { orders { id customer status revenue cost items { pizzaId quantity } } }\n- Get single order: query { order(id: \"ID\") { id customer status } }\n- Create order: mutation { createOrder(input: { customer: \"Name\", items: [{ pizzaId: \"id\", quantity: N }] }) { id status } }\n- Update status: mutation { updateOrderStatus(id: \"ID\", status: PREPARING) { id status } }  (status: PENDING|PREPARING|READY|COMPLETED)\n- Delete order: mutation { deleteOrder(id: \"ID\") }\n\nFirst, query for any needed data (e.g., pizza IDs), then execute the operation. Report the result clearly.",
+        "condition": "Exit when the order operation is complete.",
+        "modelOptions": { "newTemperature": 0.2 }
+      },
+      "position": { "x": 0, "y": 350 }
+    },
+    {
+      "id": "menu-mgmt",
+      "type": "Default",
+      "data": {
+        "name": "Menu Management",
+        "prompt": "You are managing the pizza menu. Use the graphql tool to complete the requested operation.\n\nAvailable operations:\n- List pizzas: query { pizzas { id name price ingredients { ingredientId quantity } } }\n- Get pizza: query { pizza(id: \"ID\") { id name price } }\n- Create pizza: mutation { createPizza(input: { name: \"Name\", price: 12.99, ingredients: [{ ingredientId: \"id\", quantity: 2 }] }) { id name price } }\n- Delete pizza: mutation { deletePizza(id: \"ID\") }\n\nFirst query what you need, then execute the operation. Report the result clearly.",
+        "condition": "Exit when the menu operation is complete.",
+        "modelOptions": { "newTemperature": 0.2 }
+      },
+      "position": { "x": 250, "y": 350 }
+    },
+    {
+      "id": "inventory-mgmt",
+      "type": "Default",
+      "data": {
+        "name": "Inventory Management",
+        "prompt": "You are managing pizzeria inventory. Use the graphql tool to complete the requested operation.\n\nAvailable operations:\n- List inventory: query { inventory { id name unit current max costPerUnit } }\n- Get ingredient: query { ingredient(id: \"ID\") { id name unit current max } }\n- Restock: mutation { restockIngredient(id: \"ID\", amount: N) { id name current max } }\n- Update level: mutation { updateIngredient(id: \"ID\", current: N) { id name current } }\n\nFor restocking requests, first check current levels, then restock ingredients that are below the requested threshold. Report what you changed.",
+        "condition": "Exit when the inventory operation is complete.",
+        "modelOptions": { "newTemperature": 0.2 }
+      },
+      "position": { "x": 550, "y": 350 }
+    },
+    {
+      "id": "reporting",
+      "type": "Default",
+      "data": {
+        "name": "Reporting",
+        "prompt": "You are generating a pizzeria operations report. Use the graphql tool to pull data.\n\nAvailable queries:\n- Dashboard: query { dashboard { totalOrders completedToday lowInventoryCount totalRevenue bottomLine } }\n- Orders: query { orders { id customer status revenue cost } }\n- Inventory: query { inventory { id name unit current max } }\n\nPull the relevant data and present a clear, concise operational summary.",
+        "condition": "Exit when the report is ready.",
+        "modelOptions": { "newTemperature": 0.3 }
+      },
+      "position": { "x": 800, "y": 350 }
+    },
+    {
+      "id": "end",
+      "type": "End Call",
+      "data": {
+        "name": "Done",
+        "text": "The pizzeria operation has been completed successfully."
+      },
+      "position": { "x": 400, "y": 550 }
+    }
+  ],
+  "edges": [
+    {
+      "id": "start-route",
+      "source": "start",
+      "target": "route-op",
+      "data": { "label": "continue", "description": "" }
+    },
+    {
+      "id": "route-order",
+      "source": "route-op",
+      "target": "order-mgmt",
+      "data": { "label": "Order Management", "description": "Route to order management when operation_type is order_mgmt" }
+    },
+    {
+      "id": "route-menu",
+      "source": "route-op",
+      "target": "menu-mgmt",
+      "data": { "label": "Menu Management", "description": "Route to menu management when operation_type is menu_mgmt" }
+    },
+    {
+      "id": "route-inventory",
+      "source": "route-op",
+      "target": "inventory-mgmt",
+      "data": { "label": "Inventory Management", "description": "Route to inventory management when operation_type is inventory_mgmt" }
+    },
+    {
+      "id": "route-reporting",
+      "source": "route-op",
+      "target": "reporting",
+      "data": { "label": "Reporting", "description": "Route to reporting when operation_type is reporting" }
+    },
+    {
+      "id": "order-end",
+      "source": "order-mgmt",
+      "target": "end",
+      "data": { "label": "done", "description": "Order operation complete" }
+    },
+    {
+      "id": "menu-end",
+      "source": "menu-mgmt",
+      "target": "end",
+      "data": { "label": "done", "description": "Menu operation complete" }
+    },
+    {
+      "id": "inventory-end",
+      "source": "inventory-mgmt",
+      "target": "end",
+      "data": { "label": "done", "description": "Inventory operation complete" }
+    },
+    {
+      "id": "reporting-end",
+      "source": "reporting",
+      "target": "end",
+      "data": { "label": "done", "description": "Report ready" }
+    }
+  ]
+}

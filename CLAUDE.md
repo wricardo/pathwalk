@@ -1,0 +1,100 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Commands
+
+```bash
+# Run all tests
+go test ./...
+
+# Run a single test
+go test -run TestMinimalPathway ./...
+go test -run TestPizzeriaRouting ./...
+
+# Build the CLI
+go build ./cmd/pathwalk/
+
+# Run the CLI
+./pathwalk run \
+  --pathway examples/pizzeria_ops.json \
+  --task "Create an order for John: 2x Margherita" \
+  --graphql-endpoint http://localhost:4000/graphql \
+  --model gpt-4o --api-key $OPENAI_API_KEY --verbose
+```
+
+## Architecture
+
+This is a Go library (package `pathwalk`) that executes conversational pathway JSON files as agentic pipelines.
+
+**Execution flow:**
+1. `ParsePathway` / `ParsePathwayBytes` → `Pathway` (nodes + edges indexed)
+2. `NewEngine(pathway, llmClient, opts...)` configures the runner
+3. `engine.Run(ctx, task)` walks nodes step-by-step until terminal condition
+
+**Per-node execution (`executor.go`):**
+- `NodeTypeLLM` node: three LLM calls with distinct purposes set in context — `"execute"` (main action), `"extract_vars"` (structured variable extraction via `set_variables` tool call), `"route"` (when multiple edges, LLM picks via `select_route` tool call)
+- `NodeTypeRoute` node: pure-Go condition evaluation against `state.Variables` (no LLM call)
+- `NodeTypeTerminal` node: returns `TerminalText` as final output — terminates the run
+- `NodeTypeWebhook` node: HTTP call with `{{variable}}` template substitution in body
+
+**Routing (`router.go`):**
+- Single outgoing edge → follow it automatically
+- Multiple edges on LLM/Webhook → LLM `select_route` function call
+- Route node → evaluate `RouteRule` conditions (AND logic) in order; first match wins; `FallbackNodeID` if none match
+
+**LLM interface (`llm.go`):**
+- `LLMClient` interface with `Complete(ctx, CompletionRequest) (*CompletionResponse, error)`
+- `OpenAIClient` handles the tool-call loop internally (up to 10 rounds)
+- Compatible with any OpenAI-compatible API via `--base-url`
+
+**Context keys for mock control:**
+- `NodeIDContextKey` (`"nodeID"`) — which node is calling the LLM
+- `CallPurposeContextKey` (`"callPurpose"`) — `"execute"`, `"extract_vars"`, or `"route"`
+
+## Testing with MockLLMClient
+
+All tests in `engine_test.go` use `MockLLMClient` from `pathwaytest/mock.go`. No real LLM calls are made.
+
+```go
+import "github.com/wricardo/pathwalk/pathwaytest"
+
+mock := pathwaytest.NewMockLLMClient()
+
+// Match by node ID only
+mock.OnNode("n1", pathwaytest.MockResponse{Content: "Hello!"})
+
+// Match by node ID + call purpose (more specific, wins over OnNode)
+mock.OnNodePurpose("classify", "execute", pathwaytest.MockResponse{Content: "text"})
+mock.OnNodePurpose("classify", "extract_vars", pathwaytest.MockResponse{
+    ToolCalls: []pathwaytest.MockToolCall{
+        {Name: "set_variables", Args: map[string]any{"key": "val"}},
+    },
+})
+
+// Fallback for any unmatched call
+mock.SetDefault(pathwaytest.MockResponse{Content: "fallback"})
+
+// Assertions
+mock.CallCount("n1")  // int — LLM calls for that node
+mock.Calls            // []pathwaytest.RecordedCall — full call log
+```
+
+**`RunResult.Reason` values:** `"terminal"`, `"max_steps"`, `"error"`, `"dead_end"`, `"missing_node"`
+
+## Pathway JSON format
+
+Pathways are JSON files with `nodes` and `edges` arrays. The parser maps raw JSON type strings
+to normalized NodeType constants: `"Default"` → `NodeTypeLLM`, `"End Call"` → `NodeTypeTerminal`,
+`"Webhook"` → `NodeTypeWebhook`, `"Route"` → `NodeTypeRoute`.
+
+Key `node.data` fields:
+- `isStart: true` — marks the entry node
+- `extractVars: [["name", "type", "description", required], ...]` — variables to extract
+- `routes: [{conditions: [{field, operator, value}], targetNodeId}]` — Route node rules
+- `condition` — exit condition hint passed to the LLM for routing decisions
+- `modelOptions.newTemperature` — per-node LLM temperature
+
+`extractVars` tuple format: `[name(string), type("string"|"integer"|"boolean"), description(string), required(bool)]`
+
+Route condition operators: `"is"`, `"is not"`, `"contains"`, `"not contains"`, `">"`, `"<"`, `">="`, `"<="`

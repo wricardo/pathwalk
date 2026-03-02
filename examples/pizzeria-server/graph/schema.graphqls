@@ -1,0 +1,90 @@
+enum OrderStatus {
+  PENDING
+  PREPARING
+  READY
+  COMPLETED
+}
+
+type PizzaIngredient {
+  ingredientId: ID!
+  quantity: Int!
+}
+
+type Pizza {
+  id: ID!
+  name: String!
+  price: Float!
+  ingredients: [PizzaIngredient!]!
+}
+
+type OrderItem {
+  pizzaId: ID!
+  quantity: Int!
+}
+
+type Order {
+  id: ID!
+  customer: String!
+  status: OrderStatus!
+  revenue: Float!
+  cost: Float!
+  items: [OrderItem!]!
+}
+
+type Ingredient {
+  id: ID!
+  name: String!
+  unit: String!
+  current: Int!
+  max: Int!
+  costPerUnit: Float!
+}
+
+type Dashboard {
+  totalOrders: Int!
+  completedToday: Int!
+  lowInventoryCount: Int!
+  totalRevenue: Float!
+  bottomLine: Float!
+}
+
+input PizzaIngredientInput {
+  ingredientId: ID!
+  quantity: Int!
+}
+
+input CreatePizzaInput {
+  name: String!
+  price: Float!
+  ingredients: [PizzaIngredientInput!]!
+}
+
+input OrderItemInput {
+  pizzaId: ID!
+  quantity: Int!
+}
+
+input CreateOrderInput {
+  customer: String!
+  items: [OrderItemInput!]!
+}
+
+type Query {
+  pizzas: [Pizza!]!
+  pizza(id: ID!): Pizza
+  orders: [Order!]!
+  order(id: ID!): Order
+  inventory: [Ingredient!]!
+  ingredient(id: ID!): Ingredient
+  dashboard: Dashboard!
+}
+
+type Mutation {
+  createPizza(input: CreatePizzaInput!): Pizza!
+  deletePizza(id: ID!): Boolean!
+  createOrder(input: CreateOrderInput!): Order!
+  updateOrderStatus(id: ID!, status: OrderStatus!): Order!
+  deleteOrder(id: ID!): Boolean!
+  restockIngredient(id: ID!, amount: Int!): Ingredient!
+  updateIngredient(id: ID!, current: Int!): Ingredient!
+}

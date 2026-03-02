@@ -3,7 +3,7 @@ module github.com/wricardo/pathwalk
 go 1.21
 
 require (
-	github.com/openai/openai-go v0.1.0-alpha.62
+	github.com/openai/openai-go v1.12.0
 	github.com/urfave/cli/v2 v2.27.5
 )
 

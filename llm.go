@@ -1,12 +1,16 @@
 package pathwalk
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
+	"github.com/openai/openai-go/shared"
 )
 
 // LLMClient is the interface for making LLM completions.
@@ -32,18 +36,60 @@ type CompletionResponse struct {
 	ToolCalls []ToolCall
 }
 
+// cleaningTransport is an http.RoundTripper that strips non-standard fields
+// (e.g. "reasoning") from chat completion responses before the SDK parses them.
+type cleaningTransport struct {
+	wrapped http.RoundTripper
+}
+
+func (t *cleaningTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.wrapped.RoundTrip(req)
+	if err != nil || resp == nil {
+		return resp, err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return resp, err
+	}
+
+	// Strip "reasoning" from each message in choices[].message so the SDK parses cleanly.
+	var raw map[string]any
+	if jsonErr := json.Unmarshal(body, &raw); jsonErr == nil {
+		if choices, ok := raw["choices"].([]any); ok {
+			for _, c := range choices {
+				if cm, ok := c.(map[string]any); ok {
+					if msg, ok := cm["message"].(map[string]any); ok {
+						delete(msg, "reasoning")
+					}
+				}
+			}
+		}
+		if cleaned, jsonErr := json.Marshal(raw); jsonErr == nil {
+			body = cleaned
+		}
+	}
+
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	resp.ContentLength = int64(len(body))
+	return resp, nil
+}
+
 // OpenAIClient implements LLMClient using the openai-go SDK.
-// It is compatible with any OpenAI-compatible API (Groq, Ollama, OpenRouter, etc.).
+// It is compatible with any OpenAI-compatible API (venu, Groq, Ollama, OpenRouter, etc.).
 type OpenAIClient struct {
-	client *openai.Client
+	client openai.Client
 	model  string
 }
 
 // NewOpenAIClient creates a new OpenAIClient.
 // apiKey and baseURL can be empty to use environment defaults.
 func NewOpenAIClient(apiKey, baseURL, model string) *OpenAIClient {
+	transport := &cleaningTransport{wrapped: http.DefaultTransport}
 	opts := []option.RequestOption{
 		option.WithAPIKey(apiKey),
+		option.WithHTTPClient(&http.Client{Transport: transport}),
 	}
 	if baseURL != "" {
 		opts = append(opts, option.WithBaseURL(baseURL))
@@ -54,7 +100,7 @@ func NewOpenAIClient(apiKey, baseURL, model string) *OpenAIClient {
 	}
 }
 
-const maxToolRounds = 10
+const maxToolRounds = 25
 
 // Complete sends the request to the OpenAI API, handles tool call loops, and returns
 // the final assistant content.
@@ -78,12 +124,11 @@ func (c *OpenAIClient) Complete(ctx context.Context, req CompletionRequest) (*Co
 	for _, t := range req.Tools {
 		toolMap[t.Name] = t
 		toolParams = append(toolParams, openai.ChatCompletionToolParam{
-			Type: openai.F(openai.ChatCompletionToolTypeFunction),
-			Function: openai.F(openai.FunctionDefinitionParam{
-				Name:        openai.F(t.Name),
-				Description: openai.F(t.Description),
-				Parameters:  openai.F(openai.FunctionParameters(t.Parameters)),
-			}),
+			Function: shared.FunctionDefinitionParam{
+				Name:        t.Name,
+				Description: openai.String(t.Description),
+				Parameters:  shared.FunctionParameters(t.Parameters),
+			},
 		})
 	}
 
@@ -93,17 +138,15 @@ func (c *OpenAIClient) Complete(ctx context.Context, req CompletionRequest) (*Co
 	}
 
 	params := openai.ChatCompletionNewParams{
-		Model:    openai.F(openai.ChatModel(model)),
-		Messages: openai.F(msgs),
-	}
-	if len(toolParams) > 0 {
-		params.Tools = openai.F(toolParams)
+		Model:    openai.ChatModel(model),
+		Messages: msgs,
+		Tools:    toolParams,
 	}
 	if req.Temperature > 0 {
-		params.Temperature = openai.F(req.Temperature)
+		params.Temperature = openai.Float(req.Temperature)
 	}
 	if req.MaxTokens > 0 {
-		params.MaxTokens = openai.F(int64(req.MaxTokens))
+		params.MaxTokens = openai.Int(int64(req.MaxTokens))
 	}
 
 	var allToolCalls []ToolCall
@@ -119,7 +162,7 @@ func (c *OpenAIClient) Complete(ctx context.Context, req CompletionRequest) (*Co
 
 		choice := resp.Choices[0]
 
-		if choice.FinishReason != openai.ChatCompletionChoicesFinishReasonToolCalls {
+		if choice.FinishReason != "tool_calls" {
 			return &CompletionResponse{
 				Content:   choice.Message.Content,
 				ToolCalls: allToolCalls,
@@ -127,8 +170,7 @@ func (c *OpenAIClient) Complete(ctx context.Context, req CompletionRequest) (*Co
 		}
 
 		// Append assistant message (with tool_calls) to conversation.
-		// ChatCompletionMessage satisfies ChatCompletionMessageParamUnion directly.
-		params.Messages = openai.F(append(params.Messages.Value, choice.Message))
+		params.Messages = append(params.Messages, choice.Message.ToParam())
 
 		// Execute each tool call and append tool result messages
 		for _, tc := range choice.Message.ToolCalls {
@@ -160,10 +202,8 @@ func (c *OpenAIClient) Complete(ctx context.Context, req CompletionRequest) (*Co
 
 			// Serialize result for the tool message
 			resultBytes, _ := json.Marshal(tcResult.Result)
-			params.Messages = openai.F(append(
-				params.Messages.Value,
-				openai.ToolMessage(tc.ID, string(resultBytes)),
-			))
+			params.Messages = append(params.Messages,
+				openai.ToolMessage(string(resultBytes), tc.ID))
 		}
 	}
 

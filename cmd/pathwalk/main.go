@@ -100,7 +100,6 @@ func runPathway(c *cli.Context) error {
 	// Build engine options
 	opts := []pathwalk.EngineOption{
 		pathwalk.WithMaxSteps(c.Int("max-steps")),
-		pathwalk.WithVerbose(c.Bool("verbose")),
 	}
 
 	// Wire up GraphQL tool: CLI flag takes precedence over pathway default

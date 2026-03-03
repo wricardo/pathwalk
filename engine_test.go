@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -909,7 +910,7 @@ func TestWithVerbose(t *testing.T) {
 	mock := pathwaytest.NewMockLLMClient()
 	mock.SetDefault(pathwaytest.MockResponse{Content: "hi"})
 
-	engine := pathwalk.NewEngine(pp, mock, pathwalk.WithVerbose(true))
+	engine := pathwalk.NewEngine(pp, mock)
 	result, err := engine.Run(context.Background(), "test")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -1350,7 +1351,7 @@ func TestCheckGlobalNodeLLMError(t *testing.T) {
 	mock.SetDefault(pathwaytest.MockResponse{Content: "ok"})
 
 	// WithVerbose covers the "if e.verbose { log warn }" branch inside the error block.
-	engine := pathwalk.NewEngine(pp, mock, pathwalk.WithVerbose(true))
+	engine := pathwalk.NewEngine(pp, mock)
 	result, err := engine.Run(context.Background(), "test")
 	if err != nil {
 		t.Fatalf("Run should not fail on global-check error: %v", err)
@@ -1385,7 +1386,7 @@ func TestVerboseGlobalInterception(t *testing.T) {
 	mock.OnNode("cancel", pathwaytest.MockResponse{Content: "Cancelled."})
 	mock.SetDefault(pathwaytest.MockResponse{Content: ""})
 
-	engine := pathwalk.NewEngine(pp, mock, pathwalk.WithVerbose(true))
+	engine := pathwalk.NewEngine(pp, mock)
 	result, err := engine.Run(context.Background(), "cancel my order")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -1560,7 +1561,7 @@ func TestChannelDirectiveExecution(t *testing.T) {
 		Content: `<|channel|>to=my_action<|message|>{"key":"value"}`,
 	})
 
-	engine := pathwalk.NewEngine(pp, mock, pathwalk.WithVerbose(true), pathwalk.WithTools(channelTool))
+	engine := pathwalk.NewEngine(pp, mock, pathwalk.WithTools(channelTool))
 	result, err := engine.Run(context.Background(), "test")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -1631,7 +1632,7 @@ func TestVerboseLLMWithTemperatureAndToolCalls(t *testing.T) {
 		Content:   "done",
 	})
 
-	engine := pathwalk.NewEngine(pp, mock, pathwalk.WithVerbose(true), pathwalk.WithTools(noopTool))
+	engine := pathwalk.NewEngine(pp, mock, pathwalk.WithTools(noopTool))
 	result, err := engine.Run(context.Background(), "test")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -1653,7 +1654,7 @@ func TestVerboseExtractVars(t *testing.T) {
 		},
 	})
 
-	engine := pathwalk.NewEngine(pp, mock, pathwalk.WithVerbose(true))
+	engine := pathwalk.NewEngine(pp, mock)
 	result, err := engine.Run(context.Background(), "test")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -1823,5 +1824,182 @@ func TestCheckGlobalNodeSelectZero(t *testing.T) {
 	}
 	if result.Output != "ok" {
 		t.Errorf("expected output=ok (last LLM step output), got %q", result.Output)
+	}
+}
+
+// TestEngineStep tests the Engine.Step() method which executes a single node step.
+func TestEngineStep(t *testing.T) {
+	pp := mustParsePathway(t, minimalPathwayJSON)
+	mock := pathwaytest.NewMockLLMClient()
+	mock.SetDefault(pathwaytest.MockResponse{Content: "Hello there!"})
+
+	engine := pathwalk.NewEngine(pp, mock)
+	state := pathwalk.NewState("greet me")
+
+	// Step 1: Execute the "Greet" node (LLM node)
+	result, err := engine.Step(context.Background(), state, pp.StartNode.ID)
+	if err != nil {
+		t.Fatalf("Step 1: %v", err)
+	}
+	if result.Done {
+		t.Errorf("Step 1: expected Done=false, got Done=true")
+	}
+	if result.Reason != "" {
+		t.Errorf("Step 1: expected empty Reason, got %q", result.Reason)
+	}
+	if result.NextNodeID == "" {
+		t.Errorf("Step 1: expected NextNodeID to be set")
+	}
+	if len(state.Steps) != 1 {
+		t.Errorf("Step 1: expected 1 step in state, got %d", len(state.Steps))
+	}
+
+	// Step 2: Execute the terminal node
+	result2, err := engine.Step(context.Background(), state, result.NextNodeID)
+	if err != nil {
+		t.Fatalf("Step 2: %v", err)
+	}
+	if !result2.Done {
+		t.Errorf("Step 2: expected Done=true, got Done=false")
+	}
+	if result2.Reason != "terminal" {
+		t.Errorf("Step 2: expected Reason=terminal, got %q", result2.Reason)
+	}
+	if result2.NextNodeID != "" {
+		t.Errorf("Step 2: expected empty NextNodeID, got %q", result2.NextNodeID)
+	}
+	if len(state.Steps) != 2 {
+		t.Errorf("Step 2: expected 2 steps in state, got %d", len(state.Steps))
+	}
+	if result2.Output != "Hello there!" {
+		t.Errorf("Step 2: expected output from last non-terminal step, got %q", result2.Output)
+	}
+}
+
+// TestEngineStepMissingNode tests that Step() gracefully handles a missing node.
+func TestEngineStepMissingNode(t *testing.T) {
+	pp := mustParsePathway(t, minimalPathwayJSON)
+	mock := pathwaytest.NewMockLLMClient()
+
+	engine := pathwalk.NewEngine(pp, mock)
+	state := pathwalk.NewState("test")
+
+	result, err := engine.Step(context.Background(), state, "nonexistent")
+	if err != nil {
+		t.Fatalf("Step with nonexistent node: %v", err)
+	}
+	if !result.Done {
+		t.Errorf("expected Done=true for missing node")
+	}
+	if result.Reason != "missing_node" {
+		t.Errorf("expected Reason=missing_node, got %q", result.Reason)
+	}
+}
+
+// TestEngineStepVariableExtraction tests that variables extracted by an LLM node
+// are properly merged into the state.
+func TestEngineStepVariableExtraction(t *testing.T) {
+	pp := mustParsePathway(t, extractVarsPathwayJSON)
+	mock := pathwaytest.NewMockLLMClient()
+	mock.OnNodePurpose("classify", "execute", pathwaytest.MockResponse{
+		Content: "inventory request",
+	})
+	mock.OnNodePurpose("classify", "extract_vars", pathwaytest.MockResponse{
+		ToolCalls: []pathwaytest.MockToolCall{
+			{Name: "set_variables", Args: map[string]any{"operation_type": "inventory_mgmt"}},
+		},
+	})
+
+	engine := pathwalk.NewEngine(pp, mock)
+	state := pathwalk.NewState("classify")
+
+	result, err := engine.Step(context.Background(), state, pp.StartNode.ID)
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+
+	// Verify the extracted variable is in the state
+	if got := state.Variables["operation_type"]; got != "inventory_mgmt" {
+		t.Errorf("expected operation_type=inventory_mgmt, got %v", got)
+	}
+	if result.Step.Vars["operation_type"] != "inventory_mgmt" {
+		t.Errorf("expected Vars in result to contain extracted variable")
+	}
+}
+
+// TestRunLogsCapture verifies that log records are captured in RunResult.Logs
+// and contain expected debug messages.
+func TestRunLogsCapture(t *testing.T) {
+	pp := mustParsePathway(t, minimalPathwayJSON)
+	mock := pathwaytest.NewMockLLMClient()
+	mock.OnNode("n1", pathwaytest.MockResponse{Content: "Hello there!"})
+
+	// Create a logger that captures DEBUG logs
+	handler := slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug})
+	logger := slog.New(handler)
+	engine := pathwalk.NewEngine(pp, mock, pathwalk.WithLogger(logger))
+
+	result, err := engine.Run(context.Background(), "Hello")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(result.Logs) == 0 {
+		t.Fatal("expected at least one log entry, got none")
+	}
+
+	// Check for the expected debug message about executing step
+	found := false
+	for _, entry := range result.Logs {
+		if entry.Level == "DEBUG" && strings.Contains(entry.Message, "executing step") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected to find DEBUG log with 'executing step', got logs: %v", result.Logs)
+	}
+
+	// Verify logs are JSON-serializable
+	logBytes, err := json.Marshal(result.Logs)
+	if err != nil {
+		t.Errorf("failed to marshal logs to JSON: %v", err)
+	}
+	if len(logBytes) == 0 {
+		t.Error("marshalled logs should not be empty")
+	}
+}
+
+// TestStepLogsCapture verifies that log records are captured in StepResult.Logs.
+func TestStepLogsCapture(t *testing.T) {
+	pp := mustParsePathway(t, minimalPathwayJSON)
+	mock := pathwaytest.NewMockLLMClient()
+	mock.OnNode("n1", pathwaytest.MockResponse{Content: "Hello there!"})
+
+	// Create a logger that captures DEBUG logs
+	handler := slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug})
+	logger := slog.New(handler)
+	engine := pathwalk.NewEngine(pp, mock, pathwalk.WithLogger(logger))
+	state := pathwalk.NewState("test")
+
+	result, err := engine.Step(context.Background(), state, pp.StartNode.ID)
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+
+	if len(result.Logs) == 0 {
+		t.Fatal("expected at least one log entry, got none")
+	}
+
+	// Check for the expected debug message about executing step
+	found := false
+	for _, entry := range result.Logs {
+		if entry.Level == "DEBUG" && strings.Contains(entry.Message, "executing step") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected to find DEBUG log with 'executing step'")
 	}
 }

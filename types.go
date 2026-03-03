@@ -147,6 +147,8 @@ type RunResult struct {
 	// FailedNode is the name of the node that caused the run to stop when
 	// Reason is "error" or "max_node_visits". Empty otherwise.
 	FailedNode string
+	// Logs contains all log records emitted during this run.
+	Logs []LogEntry
 }
 
 // contextKey is used for type-safe context values.
@@ -160,8 +162,6 @@ const (
 	// CallPurposeContextKey distinguishes the purpose of an LLM call.
 	// Values: "execute", "extract_vars", "route", "check_global"
 	CallPurposeContextKey contextKey = "callPurpose"
-
-	verboseCtxKey contextKey = "verbose"
 )
 
 // GlobalCheckNodeID is the node ID placed in context during the global-node-check
@@ -192,11 +192,3 @@ func CallPurposeFromContext(ctx context.Context) string {
 	return v
 }
 
-func withVerboseCtx(ctx context.Context) context.Context {
-	return context.WithValue(ctx, verboseCtxKey, true)
-}
-
-func isVerbose(ctx context.Context) bool {
-	v, _ := ctx.Value(verboseCtxKey).(bool)
-	return v
-}

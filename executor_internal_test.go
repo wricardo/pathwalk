@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -408,7 +409,7 @@ func TestConditionSummary(t *testing.T) {
 func TestExecuteNodeUnsupportedType(t *testing.T) {
 	node := &Node{ID: "x", Type: NodeType("Unknown"), Name: "BadNode"}
 	state := newState("test")
-	_, err := executeNode(context.Background(), node, state, &stubLLM{}, nil)
+	_, err := executeNode(context.Background(), node, state, &stubLLM{}, nil, slog.Default())
 	if err == nil {
 		t.Fatal("expected error for unsupported node type, got nil")
 	}
@@ -443,7 +444,7 @@ func TestExecuteNodeExtractVarsErrorInternal(t *testing.T) {
 	_ = calls
 	_ = llm
 
-	out, err := executeNode(context.Background(), node, state, errLLM, nil)
+	out, err := executeNode(context.Background(), node, state, errLLM, nil, slog.Default())
 	if err != nil {
 		t.Fatalf("expected non-fatal, got error: %v", err)
 	}

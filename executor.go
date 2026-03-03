@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -20,11 +20,11 @@ type nodeOutput struct {
 }
 
 // executeNode dispatches to the appropriate executor based on node type.
-func executeNode(ctx context.Context, node *Node, state *State, llm LLMClient, tools []Tool) (*nodeOutput, error) {
+func executeNode(ctx context.Context, node *Node, state *State, llm LLMClient, tools []Tool, log *slog.Logger) (*nodeOutput, error) {
 	ctx = WithNodeID(ctx, node.ID)
 	switch node.Type {
 	case NodeTypeLLM:
-		return executeLLM(ctx, node, state, llm, tools)
+		return executeLLM(ctx, node, state, llm, tools, log)
 	case NodeTypeTerminal:
 		return &nodeOutput{Text: node.TerminalText}, nil
 	case NodeTypeWebhook:
@@ -38,7 +38,7 @@ func executeNode(ctx context.Context, node *Node, state *State, llm LLMClient, t
 
 // executeLLM runs an LLM conversation at a Default node, with tools, and
 // optionally extracts variables from the output.
-func executeLLM(ctx context.Context, node *Node, state *State, llm LLMClient, tools []Tool) (*nodeOutput, error) {
+func executeLLM(ctx context.Context, node *Node, state *State, llm LLMClient, tools []Tool, log *slog.Logger) (*nodeOutput, error) {
 	ctx = WithCallPurpose(ctx, "execute")
 
 	systemPrompt := buildSystemPrompt(node, state)
@@ -66,18 +66,20 @@ func executeLLM(ctx context.Context, node *Node, state *State, llm LLMClient, to
 		if toolName, args, ok := parseChannelDirective(resp.Content); ok {
 			for _, t := range tools {
 				if t.Name == toolName {
-					if isVerbose(ctx) {
+					// Logging is handled directly by slog, no need for isVerbose check
+if true {
 						argsJSON, _ := json.Marshal(args)
-						log.Printf("[channel] detected %s(%s)", toolName, argsJSON)
+						log.Debug("channel directive detected", "tool", toolName, "args", string(argsJSON))
 					}
 					result, toolErr := t.Fn(ctx, args)
 					if toolErr != nil {
-						log.Printf("[warn] channel tool %q failed: %v", toolName, toolErr)
+						log.Warn("channel tool failed", "tool", toolName, "error", toolErr)
 					} else {
 						resultJSON, _ := json.Marshal(result)
 						resp.Content = string(resultJSON)
-						if isVerbose(ctx) {
-							log.Printf("[tool] %s → %s", toolName, resp.Content)
+						// Logging is handled directly by slog, no need for isVerbose check
+if true {
+							log.Debug("channel tool executed", "tool", toolName, "result", resp.Content)
 						}
 					}
 					break
@@ -86,16 +88,14 @@ func executeLLM(ctx context.Context, node *Node, state *State, llm LLMClient, to
 		}
 	}
 
-	if isVerbose(ctx) {
-		extra := ""
-		if node.Temperature > 0 {
-			extra = fmt.Sprintf(" temperature=%.1f", node.Temperature)
-		}
-		log.Printf("[llm] node=%q duration=%s%s", node.Name, time.Since(start).Round(time.Millisecond), extra)
+	// Logging is handled directly by slog, no need for isVerbose check
+if true {
+		duration := time.Since(start).Round(time.Millisecond)
+		log.Debug("LLM call completed", "node", node.Name, "duration", duration.String(), "temperature", node.Temperature)
 		for _, tc := range resp.ToolCalls {
 			argsJSON, _ := json.Marshal(tc.Args)
 			resultJSON, _ := json.Marshal(tc.Result)
-			log.Printf("[tool] %s(%s) → %s", tc.Name, argsJSON, resultJSON)
+			log.Debug("tool call result", "tool", tc.Name, "args", string(argsJSON), "result", string(resultJSON))
 		}
 	}
 
@@ -103,10 +103,10 @@ func executeLLM(ctx context.Context, node *Node, state *State, llm LLMClient, to
 
 	// Extract variables if specified
 	if len(node.ExtractVars) > 0 {
-		vars, err := extractVars(ctx, node, resp.Content, llm)
+		vars, err := extractVars(ctx, node, resp.Content, llm, log)
 		if err != nil {
 			// Non-fatal: log and continue without extracted vars
-			log.Printf("[warn] variable extraction failed at node %q: %v", node.Name, err)
+			log.Warn("variable extraction failed", "node", node.Name, "error", err)
 		} else {
 			out.Vars = vars
 		}
@@ -156,7 +156,7 @@ func buildUserMessage(state *State) string {
 }
 
 // extractVars calls the LLM to pull structured variables out of the node output.
-func extractVars(ctx context.Context, node *Node, text string, llm LLMClient) (map[string]any, error) {
+func extractVars(ctx context.Context, node *Node, text string, llm LLMClient, log *slog.Logger) (map[string]any, error) {
 	ctx = WithCallPurpose(ctx, "extract_vars")
 
 	// Build the variable descriptions
@@ -238,9 +238,9 @@ func extractVars(ctx context.Context, node *Node, text string, llm LLMClient) (m
 		}
 	}
 
-	if isVerbose(ctx) && len(result) > 0 {
+	if len(result) > 0 {
 		varsJSON, _ := json.Marshal(result)
-		log.Printf("[vars] extracted: %s", varsJSON)
+		log.Debug("variables extracted", "vars", string(varsJSON))
 	}
 
 	return result, nil

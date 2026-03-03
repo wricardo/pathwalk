@@ -20,7 +20,7 @@ go build ./cmd/pathwalk/
   --pathway examples/pizzeria_ops.json \
   --task "Create an order for John: 2x Margherita" \
   --graphql-endpoint http://localhost:4000/graphql \
-  --model gpt-4o --api-key $OPENAI_API_KEY --verbose
+  --model gpt-4o --api-key $OPENAI_API_KEY
 ```
 
 ## Architecture
@@ -30,7 +30,8 @@ This is a Go library (package `pathwalk`) that executes conversational pathway J
 **Execution flow:**
 1. `ParsePathway` / `ParsePathwayBytes` → `Pathway` (nodes + edges indexed)
 2. `NewEngine(pathway, llmClient, opts...)` configures the runner
-3. `engine.Run(ctx, task)` walks nodes step-by-step until terminal condition
+3. `engine.Run(ctx, task)` walks nodes step-by-step until terminal condition (high-level API)
+4. Alternatively, `engine.Step(ctx, state, nodeID)` executes one node at a time for fine-grained control
 
 **Per-node execution (`executor.go`):**
 - `NodeTypeLLM` node: three LLM calls with distinct purposes set in context — `"execute"` (main action), `"extract_vars"` (structured variable extraction via `set_variables` tool call), `"route"` (when multiple edges, LLM picks via `select_route` tool call)
@@ -80,7 +81,29 @@ mock.CallCount("n1")  // int — LLM calls for that node
 mock.Calls            // []pathwaytest.RecordedCall — full call log
 ```
 
-**`RunResult.Reason` values:** `"terminal"`, `"max_steps"`, `"error"`, `"dead_end"`, `"missing_node"`
+## Logging
+
+The engine uses `log/slog` for structured logging. Pass a custom logger with:
+
+```go
+import "log/slog"
+
+customLog := slog.New(slog.NewTextHandler(os.Stderr, nil))
+engine := pathwalk.NewEngine(pathway, llm, pathwalk.WithLogger(customLog))
+```
+
+During `Step()` execution, logs are captured per-step in `StepResult.Logs`.
+
+**`RunResult.Reason` values:** `"terminal"`, `"max_steps"`, `"error"`, `"dead_end"`, `"missing_node"`, `"max_node_visits"`
+
+**`StepResult` (returned by `engine.Step()`):**
+- `Step`: The step record (node executed, output, variables extracted)
+- `NextNodeID`: Node to execute next (empty when `Done==true`)
+- `Done`: True when run should terminate
+- `Reason`: Why termination occurred — `"terminal"`, `"dead_end"`, `"error"`, `"missing_node"`, `"max_node_visits"`
+- `Output`: Text output from the node
+- `Error`: Error message if applicable
+- `Logs`: Log records captured during this step
 
 ## Pathway JSON format
 

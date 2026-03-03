@@ -1,11 +1,11 @@
-# aipathwayengine
+# pathwalk
 
 A Go library and CLI that executes [Bland AI](https://www.bland.ai/)-style conversational pathway JSON files as agentic pipelines. Define your workflow as a graph of nodes and edges; the engine walks the graph, calls your LLM at each step, extracts variables, and routes to the next node automatically.
 
 ## Installation
 
 ```bash
-go get github.com/wricardo/aipathwayengine
+go get github.com/wricardo/pathwalk
 ```
 
 ## CLI
@@ -13,14 +13,13 @@ go get github.com/wricardo/aipathwayengine
 Build and run a pathway from the command line:
 
 ```bash
-go build ./cmd/aipathway/
+go build ./cmd/pathwalk/
 
-./aipathway run \
+./pathwalk run \
   --pathway examples/pizzeria_ops.json \
   --task "Create an order for John: 2x Margherita" \
   --model gpt-4o \
-  --api-key $OPENAI_API_KEY \
-  --verbose
+  --api-key $OPENAI_API_KEY
 ```
 
 ### Flags
@@ -33,7 +32,6 @@ go build ./cmd/aipathway/
 | `--api-key` | `$OPENAI_API_KEY` | API key |
 | `--base-url` | `$OPENAI_BASE_URL` | Base URL (for OpenAI-compatible APIs) |
 | `--max-steps` | `50` | Maximum nodes to traverse |
-| `--verbose`, `-v` | false | Print each step and routing decision |
 | `--graphql-endpoint` | `$GRAPHQL_ENDPOINT` | Enables the built-in `graphql` tool |
 | `--graphql-header` | | Extra HTTP headers (`Key=Value`, repeatable) |
 
@@ -47,20 +45,19 @@ import (
     "fmt"
     "log"
 
-    aipe "github.com/wricardo/aipathwayengine"
+    "github.com/wricardo/pathwalk"
 )
 
 func main() {
-    pathway, err := aipe.ParsePathway("my_pathway.json")
+    pathway, err := pathwalk.ParsePathway("my_pathway.json")
     if err != nil {
         log.Fatal(err)
     }
 
-    llm := aipe.NewOpenAIClient(apiKey, "", "gpt-4o")
+    llm := pathwalk.NewOpenAIClient(apiKey, "", "gpt-4o")
 
-    engine := aipe.NewEngine(pathway, llm,
-        aipe.WithMaxSteps(30),
-        aipe.WithVerbose(true),
+    engine := pathwalk.NewEngine(pathway, llm,
+        pathwalk.WithMaxSteps(30),
     )
 
     result, err := engine.Run(context.Background(), "My task description")
@@ -73,10 +70,27 @@ func main() {
 }
 ```
 
+### Step-by-step execution
+
+For more control over execution, use `Step()` to process one node at a time:
+
+```go
+state := pathwalk.NewState("My task description")
+nodeID := pathway.StartNodeID
+
+for {
+    result, err := engine.Step(ctx, state, nodeID)
+    if err != nil || result.Done {
+        break
+    }
+    nodeID = result.NextNodeID
+}
+```
+
 ### Adding tools
 
 ```go
-myTool := aipe.Tool{
+myTool := pathwalk.Tool{
     Name:        "lookup_user",
     Description: "Look up a user by email",
     Parameters: map[string]any{
@@ -92,19 +106,19 @@ myTool := aipe.Tool{
     },
 }
 
-engine := aipe.NewEngine(pathway, llm, aipe.WithTools(myTool))
+engine := pathwalk.NewEngine(pathway, llm, pathwalk.WithTools(myTool))
 ```
 
 The built-in GraphQL tool is available in `tools/graphql.go`:
 
 ```go
-import "github.com/wricardo/aipathwayengine/tools"
+import "github.com/wricardo/pathwalk/tools"
 
 gt := &tools.GraphQLTool{
     Endpoint: "http://localhost:4000/graphql",
     Headers:  map[string]string{"Authorization": "Bearer " + token},
 }
-engine := aipe.NewEngine(pathway, llm, aipe.WithTools(gt.AsTool()))
+engine := pathwalk.NewEngine(pathway, llm, pathwalk.WithTools(gt.AsTool()))
 ```
 
 ### RunResult
@@ -214,22 +228,22 @@ When a Default node has multiple outgoing edges, the LLM picks the route using t
 `MockLLMClient` lets you script LLM responses without network calls:
 
 ```go
-mock := aipe.NewMockLLMClient()
+mock := pathwaytest.NewMockLLMClient()
 
 // Match by node ID
-mock.OnNode("n1", aipe.MockResponse{Content: "Hello!"})
+mock.OnNode("n1", pathwaytest.MockResponse{Content: "Hello!"})
 
 // Match by node ID + call purpose ("execute", "extract_vars", or "route")
-mock.OnNodePurpose("classify", "extract_vars", aipe.MockResponse{
-    ToolCalls: []aipe.MockToolCall{
+mock.OnNodePurpose("classify", "extract_vars", pathwaytest.MockResponse{
+    ToolCalls: []pathwaytest.MockToolCall{
         {Name: "set_variables", Args: map[string]any{"operation_type": "orders"}},
     },
 })
 
 // Fallback for any unmatched call
-mock.SetDefault(aipe.MockResponse{Content: "ok"})
+mock.SetDefault(pathwaytest.MockResponse{Content: "ok"})
 
-engine := aipe.NewEngine(pathway, mock)
+engine := pathwalk.NewEngine(pathway, mock)
 result, err := engine.Run(ctx, "test task")
 
 // Assertions

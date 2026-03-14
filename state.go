@@ -2,6 +2,7 @@ package pathwalk
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -35,9 +36,14 @@ func (s *State) VarsSummary() string {
 	if len(s.Variables) == 0 {
 		return "(none)"
 	}
+	keys := make([]string, 0, len(s.Variables))
+	for k := range s.Variables {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 	var b strings.Builder
-	for k, v := range s.Variables {
-		fmt.Fprintf(&b, "  %s = %v\n", k, v)
+	for _, k := range keys {
+		fmt.Fprintf(&b, "  %s = %v\n", k, s.Variables[k])
 	}
 	return b.String()
 }

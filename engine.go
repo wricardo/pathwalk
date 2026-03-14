@@ -217,7 +217,7 @@ func (e *Engine) Step(ctx context.Context, state *State, nodeID string) (*StepRe
 	}
 
 	// Route to next node
-	nextNodeID, routeReason, err := chooseNextNode(ctx, currentNode, out, state, edges, e.llm)
+	nextNodeID, routeReason, err := chooseNextNode(ctx, currentNode, out, state, edges, e.llm, stepLog)
 	if err != nil {
 		return &StepResult{
 			Done:       true,
@@ -266,6 +266,11 @@ func (e *Engine) Step(ctx context.Context, state *State, nodeID string) (*StepRe
 }
 
 // Run executes the pathway with `task` as the initial context.
+//
+// Unlike Step, Run can return both a non-nil *RunResult and a non-nil error
+// simultaneously when Reason is "error" or "missing_node". Callers should
+// always inspect both: the result contains the partial execution state (steps
+// taken, variables extracted so far) and the error describes what went wrong.
 func (e *Engine) Run(ctx context.Context, task string) (*RunResult, error) {
 	if e.pathway.StartNode == nil {
 		return &RunResult{Reason: "missing_node"}, nil

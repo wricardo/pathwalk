@@ -12,6 +12,10 @@ import (
 	"time"
 )
 
+// webhookClient is used for all webhook HTTP requests.
+// A 30-second timeout prevents slow or hung endpoints from blocking indefinitely.
+var webhookClient = &http.Client{Timeout: 30 * time.Second}
+
 // nodeOutput is the internal result of executing a single node.
 type nodeOutput struct {
 	Text      string
@@ -66,21 +70,15 @@ func executeLLM(ctx context.Context, node *Node, state *State, llm LLMClient, to
 		if toolName, args, ok := parseChannelDirective(resp.Content); ok {
 			for _, t := range tools {
 				if t.Name == toolName {
-					// Logging is handled directly by slog, no need for isVerbose check
-if true {
-						argsJSON, _ := json.Marshal(args)
-						log.Debug("channel directive detected", "tool", toolName, "args", string(argsJSON))
-					}
+					argsJSON, _ := json.Marshal(args)
+					log.Debug("channel directive detected", "tool", toolName, "args", string(argsJSON))
 					result, toolErr := t.Fn(ctx, args)
 					if toolErr != nil {
 						log.Warn("channel tool failed", "tool", toolName, "error", toolErr)
 					} else {
 						resultJSON, _ := json.Marshal(result)
 						resp.Content = string(resultJSON)
-						// Logging is handled directly by slog, no need for isVerbose check
-if true {
-							log.Debug("channel tool executed", "tool", toolName, "result", resp.Content)
-						}
+						log.Debug("channel tool executed", "tool", toolName, "result", resp.Content)
 					}
 					break
 				}
@@ -88,15 +86,12 @@ if true {
 		}
 	}
 
-	// Logging is handled directly by slog, no need for isVerbose check
-if true {
-		duration := time.Since(start).Round(time.Millisecond)
-		log.Debug("LLM call completed", "node", node.Name, "duration", duration.String(), "temperature", node.Temperature)
-		for _, tc := range resp.ToolCalls {
-			argsJSON, _ := json.Marshal(tc.Args)
-			resultJSON, _ := json.Marshal(tc.Result)
-			log.Debug("tool call result", "tool", tc.Name, "args", string(argsJSON), "result", string(resultJSON))
-		}
+	duration := time.Since(start).Round(time.Millisecond)
+	log.Debug("LLM call completed", "node", node.Name, "duration", duration.String(), "temperature", node.Temperature)
+	for _, tc := range resp.ToolCalls {
+		argsJSON, _ := json.Marshal(tc.Args)
+		resultJSON, _ := json.Marshal(tc.Result)
+		log.Debug("tool call result", "tool", tc.Name, "args", string(argsJSON), "result", string(resultJSON))
 	}
 
 	out := &nodeOutput{Text: resp.Content, ToolCalls: resp.ToolCalls}
@@ -269,7 +264,7 @@ func executeWebhook(ctx context.Context, node *Node, state *State) (*nodeOutput,
 		req.Header.Set(k, v)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := webhookClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("webhook HTTP: %w", err)
 	}

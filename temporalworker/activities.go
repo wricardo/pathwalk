@@ -2,12 +2,31 @@ package temporalworker
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"sync"
 
 	"github.com/wricardo/pathwalk"
 	"github.com/wricardo/pathwalk/tools"
 	"go.temporal.io/sdk/activity"
 )
+
+// pathwayCache caches parsed Pathway values keyed by SHA-256 of the JSON bytes.
+// A single parse result is safe to reuse across activity calls — Pathway is read-only after parsing.
+var pathwayCache sync.Map // map[sha256-string]*pathwalk.Pathway
+
+func cachedParsePathway(data []byte) (*pathwalk.Pathway, error) {
+	key := sha256.Sum256(data)
+	if cached, ok := pathwayCache.Load(key); ok {
+		return cached.(*pathwalk.Pathway), nil
+	}
+	p, err := pathwalk.ParsePathwayBytes(data)
+	if err != nil {
+		return nil, err
+	}
+	pathwayCache.Store(key, p)
+	return p, nil
+}
 
 // StepActivityInput is the input to the ExecuteStep activity.
 type StepActivityInput struct {
@@ -39,8 +58,8 @@ func (a *PathwayActivities) ExecuteStep(ctx context.Context, input StepActivityI
 	// Record a heartbeat to show progress.
 	activity.RecordHeartbeat(ctx, "node="+input.CurrentNodeID)
 
-	// Parse the pathway.
-	pathway, err := pathwalk.ParsePathwayBytes(input.PathwayJSON)
+	// Parse the pathway (cached by SHA-256 of the JSON bytes).
+	pathway, err := cachedParsePathway(input.PathwayJSON)
 	if err != nil {
 		// Pathway parse errors — return early.
 		activity.RecordHeartbeat(ctx, fmt.Sprintf("parse_error=%v", err))

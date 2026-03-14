@@ -1,0 +1,87 @@
+{
+  "nodes": [
+    {
+      "id": "collect_info",
+      "type": "Default",
+      "data": {
+        "name": "Collect Customer Info",
+        "isStart": true,
+        "prompt": "Ask the customer for their name and email address. Once you have both, call the save_customer tool to persist the data.",
+        "condition": "Exit when the customer's name and email have been collected and saved.",
+        "extractVars": [
+          ["customer_name", "string", "The customer's full name", true],
+          ["customer_email", "string", "The customer's email address", true]
+        ],
+        "tools": [
+          {
+            "name": "save_customer",
+            "description": "Save the customer's name and email. Call this as soon as both are confirmed.",
+            "type": "webhook",
+            "behavior": "feed_context",
+            "config": {
+              "url": "https://api.example.com/customers",
+              "method": "POST",
+              "headers": {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer {{api_token}}"
+              },
+              "body": "{\"name\": \"{{customer_name}}\", \"email\": \"{{customer_email}}\"}",
+              "timeout": 10,
+              "retries": 1,
+              "response_data": ["id"]
+            },
+            "extractVars": [
+              ["customer_id", "string", "The ID assigned to the new customer", true]
+            ],
+            "responsePathways": [
+              {
+                "type": "BlandStatusCode",
+                "operator": "==",
+                "value": "409",
+                "nodeId": "already_exists",
+                "name": "Customer already exists"
+              },
+              {
+                "type": "default",
+                "nodeId": ""
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "confirm",
+      "type": "Default",
+      "data": {
+        "name": "Confirm Registration",
+        "prompt": "Tell the customer their registration was successful. Their customer ID is {{customer_id}}. Ask if there's anything else they need.",
+        "condition": "Exit after confirming the registration.",
+        "tools": []
+      }
+    },
+    {
+      "id": "already_exists",
+      "type": "Default",
+      "data": {
+        "name": "Handle Duplicate",
+        "prompt": "The customer already exists in the system. Let them know their account was found and they don't need to re-register. Ask if they need help with something else.",
+        "condition": "Exit after informing the customer.",
+        "tools": []
+      }
+    },
+    {
+      "id": "end",
+      "type": "End Call",
+      "data": {
+        "name": "End",
+        "text": "Thank you, goodbye!"
+      }
+    }
+  ],
+  "edges": [
+    { "id": "e1", "source": "collect_info", "target": "confirm", "data": { "label": "saved", "description": "Customer saved successfully" } },
+    { "id": "e2", "source": "confirm", "target": "end", "data": { "label": "done" } },
+    { "id": "e3", "source": "already_exists", "target": "end", "data": { "label": "done" } }
+  ]
+}

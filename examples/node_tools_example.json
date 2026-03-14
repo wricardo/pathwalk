@@ -1,46 +1,59 @@
 {
   "nodes": [
     {
-      "id": "collect_info",
+      "id": "take_order",
       "type": "Default",
       "data": {
-        "name": "Collect Customer Info",
+        "name": "Take Order",
         "isStart": true,
-        "prompt": "Ask the customer for their name and email address. Once you have both, call the save_customer tool to persist the data.",
-        "condition": "Exit when the customer's name and email have been collected and saved.",
+        "prompt": "You are a pizzeria order assistant. Ask the customer for their name and what pizzas they want. Use the list_pizzas tool first to see the available menu, then confirm the order details with the customer. Once confirmed, use the create_order tool to place the order.",
+        "condition": "Exit when the order has been placed successfully via the create_order tool.",
         "extractVars": [
-          ["customer_name", "string", "The customer's full name", true],
-          ["customer_email", "string", "The customer's email address", true]
+          ["customer_name", "string", "The customer's name", true],
+          ["order_id", "string", "The ID of the created order", false]
         ],
         "tools": [
           {
-            "name": "save_customer",
-            "description": "Save the customer's name and email. Call this as soon as both are confirmed.",
+            "name": "list_pizzas",
+            "description": "List all available pizzas on the menu. Call this first so you know what can be ordered.",
             "type": "webhook",
             "behavior": "feed_context",
             "config": {
-              "url": "https://api.example.com/customers",
+              "url": "http://localhost:4000/graphql",
               "method": "POST",
               "headers": {
-                "Content-Type": "application/json",
-                "Authorization": "Bearer {{api_token}}"
+                "Content-Type": "application/json"
               },
-              "body": "{\"name\": \"{{customer_name}}\", \"email\": \"{{customer_email}}\"}",
-              "timeout": 10,
-              "retries": 1,
-              "response_data": ["id"]
+              "body": "{\"query\": \"{ pizzas { id name price } }\"}",
+              "timeout": 10
             },
-            "extractVars": [
-              ["customer_id", "string", "The ID assigned to the new customer", true]
-            ],
+            "extractVars": [],
             "responsePathways": [
               {
-                "type": "BlandStatusCode",
-                "operator": "==",
-                "value": "409",
-                "nodeId": "already_exists",
-                "name": "Customer already exists"
+                "type": "default",
+                "nodeId": ""
+              }
+            ]
+          },
+          {
+            "name": "create_order",
+            "description": "Create a new order. You must provide the customer name and an array of items with pizzaId and quantity. Get pizza IDs from the list_pizzas tool first.",
+            "type": "webhook",
+            "behavior": "feed_context",
+            "config": {
+              "url": "http://localhost:4000/graphql",
+              "method": "POST",
+              "headers": {
+                "Content-Type": "application/json"
               },
+              "body": "{\"query\": \"mutation { createOrder(input: { customer: \\\"{{customer_name}}\\\", items: {{order_items}} }) { id customer status revenue items { pizzaId quantity } } }\"}",
+              "timeout": 10,
+              "response_data": ["data"]
+            },
+            "extractVars": [
+              ["order_id", "string", "The ID assigned to the new order", true]
+            ],
+            "responsePathways": [
               {
                 "type": "default",
                 "nodeId": ""
@@ -51,37 +64,61 @@
       }
     },
     {
-      "id": "confirm",
+      "id": "check_status",
       "type": "Default",
       "data": {
-        "name": "Confirm Registration",
-        "prompt": "Tell the customer their registration was successful. Their customer ID is {{customer_id}}. Ask if there's anything else they need.",
-        "condition": "Exit after confirming the registration.",
-        "tools": []
-      }
-    },
-    {
-      "id": "already_exists",
-      "type": "Default",
-      "data": {
-        "name": "Handle Duplicate",
-        "prompt": "The customer already exists in the system. Let them know their account was found and they don't need to re-register. Ask if they need help with something else.",
-        "condition": "Exit after informing the customer.",
-        "tools": []
+        "name": "Check Order Status",
+        "prompt": "The order {{order_id}} for {{customer_name}} has been placed. Use the get_order tool to check its current status and report back to the customer.",
+        "condition": "Exit after reporting the order status.",
+        "tools": [
+          {
+            "name": "get_order",
+            "description": "Look up an order by its ID to check status and details.",
+            "type": "webhook",
+            "behavior": "feed_context",
+            "config": {
+              "url": "http://localhost:4000/graphql",
+              "method": "POST",
+              "headers": {
+                "Content-Type": "application/json"
+              },
+              "body": "{\"query\": \"{ order(id: \\\"{{order_id}}\\\") { id customer status revenue cost items { pizzaId quantity } } }\"}",
+              "timeout": 10
+            },
+            "extractVars": [
+              ["order_status", "string", "Current status of the order", true]
+            ],
+            "responsePathways": [
+              {
+                "type": "default",
+                "nodeId": ""
+              }
+            ]
+          }
+        ]
       }
     },
     {
       "id": "end",
       "type": "End Call",
       "data": {
-        "name": "End",
-        "text": "Thank you, goodbye!"
+        "name": "Done",
+        "text": "Thank you for your order! Enjoy your pizza!"
       }
     }
   ],
   "edges": [
-    { "id": "e1", "source": "collect_info", "target": "confirm", "data": { "label": "saved", "description": "Customer saved successfully" } },
-    { "id": "e2", "source": "confirm", "target": "end", "data": { "label": "done" } },
-    { "id": "e3", "source": "already_exists", "target": "end", "data": { "label": "done" } }
+    {
+      "id": "e1",
+      "source": "take_order",
+      "target": "check_status",
+      "data": { "label": "order placed", "description": "Order was created successfully" }
+    },
+    {
+      "id": "e2",
+      "source": "check_status",
+      "target": "end",
+      "data": { "label": "done", "description": "Status reported to customer" }
+    }
   ]
 }

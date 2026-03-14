@@ -1703,6 +1703,70 @@ func TestParsePathwayInvalidExtractVars(t *testing.T) {
 	}
 }
 
+// TestParsePathwayBytesExtractVarsInvalidFieldType verifies that a well-formed
+// extractVars tuple whose fields have wrong JSON types (e.g. integer where a
+// string is expected) causes ParsePathwayBytes to return an error.
+func TestParsePathwayBytesExtractVarsInvalidFieldType(t *testing.T) {
+	cases := []struct {
+		name        string
+		extractVars string // JSON value for extractVars array
+		wantInErr   string
+	}{
+		{
+			name:        "name is integer",
+			extractVars: `[[123, "string", "description"]]`,
+			wantInErr:   "invalid name",
+		},
+		{
+			name:        "type field is integer",
+			extractVars: `[["my_var", 99, "description"]]`,
+			wantInErr:   "invalid type",
+		},
+		{
+			name:        "description is integer",
+			extractVars: `[["my_var", "string", 42]]`,
+			wantInErr:   "invalid description",
+		},
+		{
+			name:        "required is not boolean",
+			extractVars: `[["my_var", "string", "desc", "yes"]]`,
+			wantInErr:   "invalid required",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := `{"nodes":[{"id":"n1","type":"Default","data":{"name":"Start","isStart":true,` +
+				`"extractVars":` + tc.extractVars + `}}],"edges":[]}`
+			_, err := pathwalk.ParsePathwayBytes([]byte(raw))
+			if err == nil {
+				t.Fatalf("expected error for %s, got nil", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.wantInErr) {
+				t.Errorf("expected error to contain %q, got: %v", tc.wantInErr, err)
+			}
+		})
+	}
+}
+
+// TestParsePathwayBytesDuplicateStartNode verifies that a pathway with two
+// nodes marked isStart:true is rejected with a clear error.
+func TestParsePathwayBytesDuplicateStartNode(t *testing.T) {
+	raw := `{
+  "nodes": [
+    {"id": "a", "type": "Default", "data": {"name": "A", "isStart": true}},
+    {"id": "b", "type": "Default", "data": {"name": "B", "isStart": true}}
+  ],
+  "edges": []
+}`
+	_, err := pathwalk.ParsePathwayBytes([]byte(raw))
+	if err == nil {
+		t.Fatal("expected error for duplicate start nodes, got nil")
+	}
+	if !strings.Contains(err.Error(), "multiple start nodes") {
+		t.Errorf("expected error to mention 'multiple start nodes', got: %v", err)
+	}
+}
+
 // TestParsePathwayWebhookDefaultMethod verifies that a Webhook node with no
 // "method" field in JSON gets WebhookMethod defaulted to "POST" at parse time.
 func TestParsePathwayWebhookDefaultMethod(t *testing.T) {

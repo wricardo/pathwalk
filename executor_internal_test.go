@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -641,5 +642,34 @@ func TestExecuteWebhookDefaultMethod(t *testing.T) {
 	}
 	if gotMethod != "POST" {
 		t.Errorf("expected method=POST, got %q", gotMethod)
+	}
+}
+
+// TestVarsSummaryIsSorted verifies that VarsSummary returns variables in
+// alphabetical key order regardless of map iteration order.
+func TestVarsSummaryIsSorted(t *testing.T) {
+	s := newState("task")
+	s.Variables = map[string]any{
+		"zebra":  1,
+		"apple":  2,
+		"mango":  3,
+		"banana": 4,
+	}
+	out := s.VarsSummary()
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	keys := make([]string, 0, len(lines))
+	for _, l := range lines {
+		// each line is "  key = value"
+		parts := strings.SplitN(strings.TrimSpace(l), " = ", 2)
+		if len(parts) == 2 {
+			keys = append(keys, parts[0])
+		}
+	}
+	if !sort.StringsAreSorted(keys) {
+		t.Errorf("VarsSummary keys are not sorted: %v", keys)
+	}
+	// Also verify all four keys are present
+	if len(keys) != 4 {
+		t.Errorf("expected 4 keys, got %d: %v", len(keys), keys)
 	}
 }

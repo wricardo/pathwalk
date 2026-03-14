@@ -160,18 +160,26 @@ func ParsePathwayBytes(data []byte) (*Pathway, error) {
 		}
 
 		// Parse extractVars — each element is [name, type, description, required]
-		for _, raw := range rn.Data.ExtractVars {
+		for i, raw := range rn.Data.ExtractVars {
 			var tuple []json.RawMessage
 			if err := json.Unmarshal(raw, &tuple); err != nil || len(tuple) < 3 {
 				continue
 			}
 			var name, typ, desc string
-			json.Unmarshal(tuple[0], &name)
-			json.Unmarshal(tuple[1], &typ)
-			json.Unmarshal(tuple[2], &desc)
+			if err := json.Unmarshal(tuple[0], &name); err != nil {
+				return nil, fmt.Errorf("node %q extractVars[%d]: invalid name: %w", rn.Data.Name, i, err)
+			}
+			if err := json.Unmarshal(tuple[1], &typ); err != nil {
+				return nil, fmt.Errorf("node %q extractVars[%d]: invalid type: %w", rn.Data.Name, i, err)
+			}
+			if err := json.Unmarshal(tuple[2], &desc); err != nil {
+				return nil, fmt.Errorf("node %q extractVars[%d]: invalid description: %w", rn.Data.Name, i, err)
+			}
 			required := false
 			if len(tuple) >= 4 {
-				json.Unmarshal(tuple[3], &required)
+				if err := json.Unmarshal(tuple[3], &required); err != nil {
+					return nil, fmt.Errorf("node %q extractVars[%d]: invalid required flag: %w", rn.Data.Name, i, err)
+				}
 			}
 			n.ExtractVars = append(n.ExtractVars, VariableDef{
 				Name: name, Type: typ, Description: desc, Required: required,
@@ -196,6 +204,9 @@ func ParsePathwayBytes(data []byte) (*Pathway, error) {
 		pp.Nodes = append(pp.Nodes, n)
 		pp.NodeByID[n.ID] = n
 		if n.IsStart {
+			if pp.StartNode != nil {
+				return nil, fmt.Errorf("pathway has multiple start nodes: %q and %q", pp.StartNode.ID, n.ID)
+			}
 			pp.StartNode = n
 		}
 		if n.IsGlobal && n.GlobalLabel != "" {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 )
@@ -19,6 +20,7 @@ func chooseNextNode(
 	state *State,
 	edges []*Edge,
 	llm LLMClient,
+	log *slog.Logger,
 ) (string, string, error) { // returns (targetNodeID, reason, error)
 
 	if len(edges) == 0 {
@@ -33,7 +35,7 @@ func chooseNextNode(
 		if len(edges) == 1 {
 			return edges[0].Target, "single edge", nil
 		}
-		return llmRoute(ctx, node, out, state, edges, llm)
+		return llmRoute(ctx, node, out, state, edges, llm, log)
 
 	default:
 		return edges[0].Target, "default", nil
@@ -48,6 +50,7 @@ func llmRoute(
 	state *State,
 	edges []*Edge,
 	llm LLMClient,
+	log *slog.Logger,
 ) (string, string, error) {
 	ctx = WithNodeID(ctx, node.ID)
 	ctx = WithCallPurpose(ctx, "route")
@@ -118,24 +121,30 @@ func llmRoute(
 	// Find the select_route tool call
 	for _, tc := range resp.ToolCalls {
 		if tc.Name == "select_route" {
-			routeNum, reason := parseSelectRoute(tc.Args, len(edges))
-			if routeNum >= 1 && routeNum <= len(edges) {
-				edge := edges[routeNum-1]
-				r := reason
-				if r == "" {
-					r = fmt.Sprintf("selected route %d", routeNum)
-				}
-				return edge.Target, r, nil
+			routeNum, reason := parseSelectRoute(tc.Args)
+			if routeNum < 1 || routeNum > len(edges) {
+				log.Warn("LLM returned invalid route number, falling back to route 1",
+					"returned", routeNum, "max", len(edges), "node", node.Name)
+				routeNum = 1
 			}
+			edge := edges[routeNum-1]
+			r := reason
+			if r == "" {
+				r = fmt.Sprintf("selected route %d", routeNum)
+			}
+			return edge.Target, r, nil
 		}
 	}
 
-	// Fallback: first edge
+	// Fallback: first edge (LLM did not call select_route)
+	log.Warn("LLM did not call select_route, falling back to first edge", "node", node.Name)
 	return edges[0].Target, "fallback to first edge", nil
 }
 
 // parseSelectRoute extracts route number and reason from select_route tool args.
-func parseSelectRoute(args map[string]any, maxRoutes int) (int, string) {
+// The route number is returned as-is (no clamping); callers are responsible for
+// validating and logging when the value is out of range.
+func parseSelectRoute(args map[string]any) (int, string) {
 	route := 0
 	reason := ""
 
@@ -158,9 +167,6 @@ func parseSelectRoute(args map[string]any, maxRoutes int) (int, string) {
 		reason = rs
 	}
 
-	if route < 1 || route > maxRoutes {
-		route = 1
-	}
 	return route, reason
 }
 

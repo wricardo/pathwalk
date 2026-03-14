@@ -247,22 +247,22 @@ func TestParseSelectRoute(t *testing.T) {
 	tests := []struct {
 		name       string
 		args       map[string]any
-		maxRoutes  int
 		wantRoute  int
 		wantReason string
 	}{
-		{"float64", map[string]any{"route": float64(2)}, 3, 2, ""},
-		{"int", map[string]any{"route": 1}, 3, 1, ""},
-		{"string", map[string]any{"route": "3"}, 3, 3, ""},
-		{"json.Number", map[string]any{"route": json.Number("2")}, 3, 2, ""},
-		{"with reason", map[string]any{"route": float64(1), "reason": "best match"}, 3, 1, "best match"},
-		{"out of bounds high→1", map[string]any{"route": float64(5)}, 3, 1, ""},
-		{"zero→1", map[string]any{"route": float64(0)}, 3, 1, ""},
-		{"missing key→1", map[string]any{}, 3, 1, ""},
+		{"float64", map[string]any{"route": float64(2)}, 2, ""},
+		{"int", map[string]any{"route": 1}, 1, ""},
+		{"string", map[string]any{"route": "3"}, 3, ""},
+		{"json.Number", map[string]any{"route": json.Number("2")}, 2, ""},
+		{"with reason", map[string]any{"route": float64(1), "reason": "best match"}, 1, "best match"},
+		// out-of-range values are returned as-is; clamping is the caller's responsibility
+		{"out of bounds high", map[string]any{"route": float64(5)}, 5, ""},
+		{"zero", map[string]any{"route": float64(0)}, 0, ""},
+		{"missing key", map[string]any{}, 0, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			route, reason := parseSelectRoute(tc.args, tc.maxRoutes)
+			route, reason := parseSelectRoute(tc.args)
 			if route != tc.wantRoute {
 				t.Errorf("route=%d, want %d", route, tc.wantRoute)
 			}
@@ -494,7 +494,7 @@ func TestChooseNextNodeDefaultCase(t *testing.T) {
 	state := newState("test")
 	out := &nodeOutput{Text: "output"}
 
-	targetID, reason, err := chooseNextNode(context.Background(), node, out, state, []*Edge{edge}, &stubLLM{})
+	targetID, reason, err := chooseNextNode(context.Background(), node, out, state, []*Edge{edge}, &stubLLM{}, slog.Default())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

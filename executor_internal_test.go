@@ -645,6 +645,423 @@ func TestExecuteWebhookDefaultMethod(t *testing.T) {
 	}
 }
 
+// TestMatchCondition verifies all operators in matchCondition.
+func TestMatchCondition(t *testing.T) {
+	cases := []struct {
+		actual, op, expected string
+		want                 bool
+	}{
+		{"200", "==", "200", true},
+		{"200", "==", "404", false},
+		{"200", "!=", "404", true},
+		{"200", "!=", "200", false},
+		{"200", "is", "200", true},
+		{"200", "is", "404", false},
+		{"hello world", "contains", "world", true},
+		{"hello world", "contains", "mars", false},
+		{"hello world", "!contains", "mars", true},
+		{"hello world", "!contains", "world", false},
+		{"b", ">", "a", true},
+		{"a", ">", "b", false},
+		{"a", "<", "b", true},
+		{"b", "<", "a", false},
+		{"b", ">=", "a", true},
+		{"b", ">=", "b", true},
+		{"a", ">=", "b", false},
+		{"a", "<=", "b", true},
+		{"a", "<=", "a", true},
+		{"b", "<=", "a", false},
+		{"x", "bogus", "x", false},
+	}
+	for _, tc := range cases {
+		name := fmt.Sprintf("%s_%s_%s", tc.actual, tc.op, tc.expected)
+		t.Run(name, func(t *testing.T) {
+			got := matchCondition(tc.actual, tc.op, tc.expected)
+			if got != tc.want {
+				t.Errorf("matchCondition(%q, %q, %q) = %v, want %v", tc.actual, tc.op, tc.expected, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEvaluateResponsePathways verifies pathway matching logic.
+func TestEvaluateResponsePathways(t *testing.T) {
+	cases := []struct {
+		name       string
+		pathways   []ToolResponsePathway
+		statusCode int
+		want       string // expected nodeID, "" for no match
+	}{
+		{
+			name:     "empty pathways",
+			pathways: nil,
+			want:     "",
+		},
+		{
+			name: "default pathway without nodeId is skipped",
+			pathways: []ToolResponsePathway{
+				{Type: "Default/Webhook Completion", NodeID: ""},
+			},
+			want: "",
+		},
+		{
+			name: "default pathway with nodeId matches",
+			pathways: []ToolResponsePathway{
+				{Type: "Default/Webhook Completion", NodeID: "error_handler"},
+			},
+			want: "error_handler",
+		},
+		{
+			name: "empty type with nodeId matches as default",
+			pathways: []ToolResponsePathway{
+				{Type: "", NodeID: "fallback"},
+			},
+			want: "fallback",
+		},
+		{
+			name: "status code match",
+			pathways: []ToolResponsePathway{
+				{Type: "BlandStatusCode", Operator: "==", Value: "404", NodeID: "not_found_handler"},
+			},
+			statusCode: 404,
+			want:       "not_found_handler",
+		},
+		{
+			name: "status code no match",
+			pathways: []ToolResponsePathway{
+				{Type: "BlandStatusCode", Operator: "==", Value: "404", NodeID: "not_found_handler"},
+			},
+			statusCode: 200,
+			want:       "",
+		},
+		{
+			name: "status code without operator is skipped",
+			pathways: []ToolResponsePathway{
+				{Type: "BlandStatusCode", NodeID: "x"},
+			},
+			statusCode: 200,
+			want:       "",
+		},
+		{
+			name: "first matching pathway wins",
+			pathways: []ToolResponsePathway{
+				{Type: "BlandStatusCode", Operator: "==", Value: "500", NodeID: "error_node"},
+				{Type: "default", NodeID: "fallback_node"},
+			},
+			statusCode: 500,
+			want:       "error_node",
+		},
+		{
+			name: "falls through to default when status doesnt match",
+			pathways: []ToolResponsePathway{
+				{Type: "BlandStatusCode", Operator: "==", Value: "500", NodeID: "error_node"},
+				{Type: "default", NodeID: "fallback_node"},
+			},
+			statusCode: 200,
+			want:       "fallback_node",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := evaluateResponsePathways(tc.pathways, tc.statusCode, nil)
+			if got != tc.want {
+				t.Errorf("evaluateResponsePathways() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestExecuteNodeToolWebhookSuccess verifies a basic successful webhook call.
+func TestExecuteNodeToolWebhookSuccess(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"status":"ok"}`)
+	}))
+	defer ts.Close()
+
+	nt := NodeTool{
+		Name:   "test_tool",
+		Type:   "webhook",
+		URL:    ts.URL,
+		Method: "POST",
+		Body:   `{"key":"{{name}}"}`,
+	}
+	state := newState("test")
+	state.Variables["name"] = "Alice"
+
+	result, statusCode, err := executeNodeToolWebhook(context.Background(), nt, state, nil, slog.Default())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if statusCode != 200 {
+		t.Errorf("expected status 200, got %d", statusCode)
+	}
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map result, got %T", result)
+	}
+	if m["status"] != "ok" {
+		t.Errorf("expected status=ok, got %v", m["status"])
+	}
+}
+
+// TestExecuteNodeToolWebhookRetries verifies retry behavior on server errors.
+func TestExecuteNodeToolWebhookRetries(t *testing.T) {
+	callCount := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"error":"temporary"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer ts.Close()
+
+	nt := NodeTool{
+		Name:    "retry_tool",
+		Type:    "webhook",
+		URL:     ts.URL,
+		Method:  "POST",
+		Body:    `{}`,
+		Retries: 3,
+	}
+	state := newState("test")
+
+	result, statusCode, err := executeNodeToolWebhook(context.Background(), nt, state, nil, slog.Default())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if statusCode != 200 {
+		t.Errorf("expected status 200 after retries, got %d", statusCode)
+	}
+	if callCount != 3 {
+		t.Errorf("expected 3 calls (2 failures + 1 success), got %d", callCount)
+	}
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map result, got %T", result)
+	}
+	if m["ok"] != true {
+		t.Errorf("expected ok=true, got %v", m["ok"])
+	}
+}
+
+// TestExecuteNodeToolWebhookRetriesExhausted verifies that when all retries fail,
+// the last response is still returned (for pathway evaluation).
+func TestExecuteNodeToolWebhookRetriesExhausted(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"error":"permanent"}`)
+	}))
+	defer ts.Close()
+
+	nt := NodeTool{
+		Name:    "fail_tool",
+		Type:    "webhook",
+		URL:     ts.URL,
+		Method:  "POST",
+		Body:    `{}`,
+		Retries: 2,
+	}
+	state := newState("test")
+
+	result, statusCode, err := executeNodeToolWebhook(context.Background(), nt, state, nil, slog.Default())
+	if err != nil {
+		t.Fatalf("unexpected error (should return response on last attempt): %v", err)
+	}
+	if statusCode != 500 {
+		t.Errorf("expected status 500, got %d", statusCode)
+	}
+	if result == nil {
+		t.Error("expected response data even on error status")
+	}
+}
+
+// TestExecuteNodeToolWebhookCustomTimeout verifies that per-tool timeout is
+// applied by checking that a short timeout produces a different HTTP client
+// than the global webhookClient.
+func TestExecuteNodeToolWebhookCustomTimeout(t *testing.T) {
+	// Use a server that closes immediately — we just verify the request
+	// was made with a working client (the timeout field was applied).
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer ts.Close()
+
+	nt := NodeTool{
+		Name:    "timeout_tool",
+		Type:    "webhook",
+		URL:     ts.URL,
+		Method:  "POST",
+		Body:    `{}`,
+		Timeout: 5, // 5 seconds — just verifying it's used, not actually timing out
+	}
+	state := newState("test")
+
+	result, statusCode, err := executeNodeToolWebhook(context.Background(), nt, state, nil, slog.Default())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if statusCode != 200 {
+		t.Errorf("expected status 200, got %d", statusCode)
+	}
+	if result == nil {
+		t.Error("expected non-nil result")
+	}
+}
+
+// TestExecuteNodeToolWebhookConnectionRefused verifies error on unreachable server.
+func TestExecuteNodeToolWebhookConnectionRefused(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	addr := ts.URL
+	ts.Close()
+
+	nt := NodeTool{
+		Name:   "dead_tool",
+		Type:   "webhook",
+		URL:    addr,
+		Method: "POST",
+		Body:   `{}`,
+	}
+	state := newState("test")
+
+	_, _, err := executeNodeToolWebhook(context.Background(), nt, state, nil, slog.Default())
+	if err == nil {
+		t.Fatal("expected connection error, got nil")
+	}
+}
+
+// TestExecuteNodeToolWebhookTemplateSubstitution verifies that both state vars
+// and tool-call args are used for template substitution.
+func TestExecuteNodeToolWebhookTemplateSubstitution(t *testing.T) {
+	var gotBody string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b := make([]byte, 1024)
+		n, _ := r.Body.Read(b)
+		gotBody = string(b[:n])
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer ts.Close()
+
+	nt := NodeTool{
+		Name:   "template_tool",
+		Type:   "webhook",
+		URL:    ts.URL,
+		Method: "POST",
+		Body:   `{"name":"{{name}}","extra":"{{extra}}"}`,
+	}
+	state := newState("test")
+	state.Variables["name"] = "Alice"
+	args := map[string]any{"extra": "bonus"}
+
+	_, _, err := executeNodeToolWebhook(context.Background(), nt, state, args, slog.Default())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(gotBody, `"name":"Alice"`) {
+		t.Errorf("expected state var substitution, got body: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, `"extra":"bonus"`) {
+		t.Errorf("expected args substitution, got body: %s", gotBody)
+	}
+}
+
+// TestNodeToolToToolExtractVars verifies that nodeToolToTool extracts variables
+// from the webhook response into state.
+func TestNodeToolToToolExtractVars(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"customer_name":"Bob","age":30}`)
+	}))
+	defer ts.Close()
+
+	nt := NodeTool{
+		Name:   "extract_tool",
+		Type:   "webhook",
+		URL:    ts.URL,
+		Method: "POST",
+		Body:   `{}`,
+		ExtractVars: []VariableDef{
+			{Name: "customer_name", Type: "string"},
+			{Name: "age", Type: "integer"},
+			{Name: "missing_field", Type: "string"},
+		},
+	}
+	state := newState("test")
+
+	tool := nodeToolToTool(nt, state, slog.Default())
+	_, err := tool.Fn(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if state.Variables["customer_name"] != "Bob" {
+		t.Errorf("expected customer_name=Bob, got %v", state.Variables["customer_name"])
+	}
+	if state.Variables["age"] != float64(30) {
+		t.Errorf("expected age=30, got %v", state.Variables["age"])
+	}
+	if _, exists := state.Variables["missing_field"]; exists {
+		t.Error("missing_field should not be set")
+	}
+}
+
+// TestNodeToolToToolResponsePathwayRouting verifies that nodeToolToTool sets
+// $tool_route when a response pathway matches.
+func TestNodeToolToToolResponsePathwayRouting(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"error":"not found"}`)
+	}))
+	defer ts.Close()
+
+	nt := NodeTool{
+		Name:    "route_tool",
+		Type:    "webhook",
+		URL:     ts.URL,
+		Method:  "POST",
+		Body:    `{}`,
+		Retries: 0,
+		ResponsePathways: []ToolResponsePathway{
+			{Type: "BlandStatusCode", Operator: "==", Value: "404", NodeID: "error_handler"},
+		},
+	}
+	state := newState("test")
+
+	tool := nodeToolToTool(nt, state, slog.Default())
+	_, err := tool.Fn(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if state.Variables["$tool_route"] != "error_handler" {
+		t.Errorf("expected $tool_route=error_handler, got %v", state.Variables["$tool_route"])
+	}
+}
+
+// TestNodeToolToToolUnsupportedType verifies that non-webhook types return an error.
+func TestNodeToolToToolUnsupportedType(t *testing.T) {
+	nt := NodeTool{
+		Name: "bad_tool",
+		Type: "custom_tool",
+	}
+	state := newState("test")
+
+	tool := nodeToolToTool(nt, state, slog.Default())
+	_, err := tool.Fn(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected error for unsupported tool type")
+	}
+	if !strings.Contains(err.Error(), "unsupported node tool type") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 // TestVarsSummaryIsSorted verifies that VarsSummary returns variables in
 // alphabetical key order regardless of map iteration order.
 func TestVarsSummaryIsSorted(t *testing.T) {

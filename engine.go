@@ -10,12 +10,13 @@ const defaultMaxSteps = 50
 
 // StepResult captures what happened during a single node execution.
 type StepResult struct {
-	Step       Step   // The step record for this execution
-	NextNodeID string // Empty when Done=true (terminal, dead_end, error, or max_node_visits)
-	Done       bool   // True when the run should terminate
-	Reason     string // "terminal", "dead_end", "error", "missing_node", "max_node_visits"
-	Output     string // Text output from the node
-	Error      string // Error message if Reason=="error" or "max_node_visits"
+	Step       Step       // The step record for this execution
+	NextNodeID string     // Empty when Done=true (terminal, dead_end, error, or max_node_visits)
+	Done       bool       // True when the run should terminate
+	Reason     string     // "terminal", "dead_end", "error", "missing_node", "max_node_visits"
+	Output     string     // Text output from the node
+	Error      string     // Error message if Reason=="error" or "max_node_visits"
+	FailedNode string     // Name of the node that caused the stop when Reason is "error" or "max_node_visits"
 	Logs       []LogEntry // Log records emitted during this step
 }
 
@@ -133,10 +134,11 @@ func (e *Engine) Step(ctx context.Context, state *State, nodeID string) (*StepRe
 	}
 	if nodeVisitLimit > 0 && state.VisitCounts[currentNode.ID] > nodeVisitLimit {
 		return &StepResult{
-			Done:   true,
-			Reason: "max_node_visits",
-			Error:  fmt.Sprintf("node %q exceeded max visits (%d)", currentNode.Name, nodeVisitLimit),
-			Logs:   lc.flush(),
+			Done:       true,
+			Reason:     "max_node_visits",
+			Error:      fmt.Sprintf("node %q exceeded max visits (%d)", currentNode.Name, nodeVisitLimit),
+			FailedNode: currentNode.Name,
+			Logs:       lc.flush(),
 		}, nil
 	}
 
@@ -165,10 +167,11 @@ func (e *Engine) Step(ctx context.Context, state *State, nodeID string) (*StepRe
 	out, err := executeNode(ctx, currentNode, state, e.llm, e.tools, stepLog)
 	if err != nil {
 		return &StepResult{
-			Done:   true,
-			Reason: "error",
-			Error:  fmt.Sprintf("executing node %q: %v", currentNode.Name, err),
-			Logs:   lc.flush(),
+			Done:       true,
+			Reason:     "error",
+			Error:      fmt.Sprintf("executing node %q: %v", currentNode.Name, err),
+			FailedNode: currentNode.Name,
+			Logs:       lc.flush(),
 		}, nil
 	}
 
@@ -217,10 +220,12 @@ func (e *Engine) Step(ctx context.Context, state *State, nodeID string) (*StepRe
 	nextNodeID, routeReason, err := chooseNextNode(ctx, currentNode, out, state, edges, e.llm)
 	if err != nil {
 		return &StepResult{
-			Done:   true,
-			Reason: "error",
-			Error:  fmt.Sprintf("routing from node %q: %v", currentNode.Name, err),
-			Logs:   lc.flush(),
+			Done:       true,
+			Reason:     "error",
+			Error:      fmt.Sprintf("routing from node %q: %v", currentNode.Name, err),
+			Output:     out.Text,
+			FailedNode: currentNode.Name,
+			Logs:       lc.flush(),
 		}, nil
 	}
 
@@ -262,11 +267,12 @@ func (e *Engine) Step(ctx context.Context, state *State, nodeID string) (*StepRe
 
 // Run executes the pathway with `task` as the initial context.
 func (e *Engine) Run(ctx context.Context, task string) (*RunResult, error) {
-	lc := newLogCapture(e.log.Handler())
-	runLog := slog.New(lc)
+	if e.pathway.StartNode == nil {
+		return &RunResult{Reason: "missing_node"}, nil
+	}
 
 	state := newState(task)
-	currentNode := e.pathway.StartNode
+	nodeID := e.pathway.StartNode.ID
 
 	// Pathway-level maxTurns overrides the engine default when set.
 	stepCap := e.maxSteps
@@ -274,179 +280,37 @@ func (e *Engine) Run(ctx context.Context, task string) (*RunResult, error) {
 		stepCap = e.pathway.MaxTurns
 	}
 
-	for step := 0; step < stepCap; step++ {
-		if currentNode == nil {
-			return &RunResult{
-				Output:    "",
-				Variables: state.Variables,
-				Steps:     state.Steps,
-				Reason:    "missing_node",
-				Logs:      lc.flush(),
-			}, nil
-		}
+	var allLogs []LogEntry
 
-		// Check global nodes before executing the current node.
-		if e.globalNodeCheck {
-			globalNode, err := checkGlobalNode(ctx, e.pathway.GlobalNodes, state, e.llm)
-			if err != nil {
-				runLog.Warn("global node check failed", "error", err)
-				// Non-fatal: fall through and execute currentNode as normal.
-			} else if globalNode != nil {
-				runLog.Debug("global node intercepted", "node", globalNode.Name)
-				currentNode = globalNode
-			}
-		}
+	for i := 0; i < stepCap; i++ {
+		result, _ := e.Step(ctx, state, nodeID) // Step never returns a non-nil error
+		allLogs = append(allLogs, result.Logs...)
 
-		runLog.Debug("executing step", "step", step+1, "node", currentNode.Name, "type", currentNode.Type)
-
-		// Enforce per-node visit cap.
-		state.VisitCounts[currentNode.ID]++
-		nodeVisitLimit := e.pathway.MaxVisitsPerNode
-		if currentNode.MaxVisits > 0 {
-			nodeVisitLimit = currentNode.MaxVisits
-		}
-		if nodeVisitLimit > 0 && state.VisitCounts[currentNode.ID] > nodeVisitLimit {
-			return &RunResult{
+		if result.Done {
+			rr := &RunResult{
+				Output:     result.Output,
 				Variables:  state.Variables,
 				Steps:      state.Steps,
-				Reason:     "max_node_visits",
-				FailedNode: currentNode.Name,
-				Logs:       lc.flush(),
-			}, nil
-		}
-
-		// Skip unsupported node types
-		switch currentNode.Type {
-		case NodeTypeLLM, NodeTypeTerminal, NodeTypeWebhook, NodeTypeRoute:
-			// handled below
-		default:
-			runLog.Warn("skipping unsupported node type", "type", currentNode.Type, "node", currentNode.Name)
-			edges := e.pathway.EdgesFrom[currentNode.ID]
-			if len(edges) == 0 {
-				return &RunResult{
-					Variables: state.Variables,
-					Steps:     state.Steps,
-					Reason:    "dead_end",
-					Logs:      lc.flush(),
-				}, nil
+				Reason:     result.Reason,
+				FailedNode: result.FailedNode,
+				Logs:       allLogs,
 			}
-			currentNode = e.pathway.NodeByID[edges[0].Target]
-			continue
-		}
-
-		// Execute the node
-		out, err := executeNode(ctx, currentNode, state, e.llm, e.tools, runLog)
-		if err != nil {
-			return &RunResult{
-				Output:     "",
-				Variables:  state.Variables,
-				Steps:      state.Steps,
-				Reason:     "error",
-				FailedNode: currentNode.Name,
-				Logs:       lc.flush(),
-			}, fmt.Errorf("executing node %q: %w", currentNode.Name, err)
-		}
-
-		// Apply extracted variables to state
-		if out.Vars != nil {
-			state.SetVars(out.Vars)
-		}
-
-		// Find outgoing edges
-		edges := e.pathway.EdgesFrom[currentNode.ID]
-
-		// Determine next node
-		var nextNodeID, routeReason string
-		if currentNode.Type == NodeTypeTerminal {
-			sl := Step{
-				NodeID:      currentNode.ID,
-				NodeName:    currentNode.Name,
-				Output:      out.Text,
-				Vars:        copyVars(out.Vars),
-				ToolCalls:   out.ToolCalls,
-				RouteReason: "terminal",
-				NextNode:    "(end)",
+			// "error" and "missing_node" are unexpected mid-run failures;
+			// surface them as Go errors to preserve the Run() contract.
+			if result.Reason == "error" || result.Reason == "missing_node" {
+				return rr, fmt.Errorf("%s", result.Error)
 			}
-			state.Steps = append(state.Steps, sl)
-			e.log.Debug("terminal node reached", "node", currentNode.Name)
-			// Terminal nodes hold static text; the meaningful answer is in the
-			// last LLM/webhook step that ran before the terminal. Walk back
-			// through prior steps (skip the terminal we just appended) to find it.
-			output := out.Text
-			for i := len(state.Steps) - 2; i >= 0; i-- {
-				if state.Steps[i].Output != "" {
-					output = state.Steps[i].Output
-					break
-				}
-			}
-			return &RunResult{
-				Output:    output,
-				Variables: state.Variables,
-				Steps:     state.Steps,
-				Reason:    "terminal",
-				Logs:      lc.flush(),
-			}, nil
+			return rr, nil
 		}
 
-		nextNodeID, routeReason, err = chooseNextNode(ctx, currentNode, out, state, edges, e.llm)
-		if err != nil {
-			return &RunResult{
-				Output:     out.Text,
-				Variables:  state.Variables,
-				Steps:      state.Steps,
-				Reason:     "error",
-				FailedNode: currentNode.Name,
-				Logs:       lc.flush(),
-			}, fmt.Errorf("routing from node %q: %w", currentNode.Name, err)
-		}
-
-		nextName := nextNodeID
-		if n, ok := e.pathway.NodeByID[nextNodeID]; ok {
-			nextName = n.Name
-		}
-		runLog.Debug("routing to next node", "from", currentNode.Name, "to", nextName, "reason", routeReason)
-
-		// Record step
-		sl := Step{
-			NodeID:      currentNode.ID,
-			NodeName:    currentNode.Name,
-			Output:      out.Text,
-			Vars:        copyVars(out.Vars),
-			ToolCalls:   out.ToolCalls,
-			RouteReason: routeReason,
-			NextNode:    nextNodeID,
-		}
-		state.Steps = append(state.Steps, sl)
-
-		if nextNodeID == "" {
-			return &RunResult{
-				Output:    out.Text,
-				Variables: state.Variables,
-				Steps:     state.Steps,
-				Reason:    "dead_end",
-				Logs:      lc.flush(),
-			}, nil
-		}
-
-		next, ok := e.pathway.NodeByID[nextNodeID]
-		if !ok {
-			return &RunResult{
-				Output:    out.Text,
-				Variables: state.Variables,
-				Steps:     state.Steps,
-				Reason:    "error",
-				Logs:      lc.flush(),
-			}, fmt.Errorf("next node %q not found in pathway", nextNodeID)
-		}
-		currentNode = next
+		nodeID = result.NextNodeID
 	}
 
 	return &RunResult{
-		Output:    "",
 		Variables: state.Variables,
 		Steps:     state.Steps,
 		Reason:    "max_steps",
-		Logs:      lc.flush(),
+		Logs:      allLogs,
 	}, nil
 }
 

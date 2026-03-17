@@ -2067,3 +2067,73 @@ func TestStepLogsCapture(t *testing.T) {
 		t.Errorf("expected to find DEBUG log with 'executing step'")
 	}
 }
+
+// TestStepToolRouteOverride verifies that when $tool_route is set in state
+// variables (by a node tool's response pathway), the engine follows that route
+// instead of normal edge-based routing.
+func TestStepToolRouteOverride(t *testing.T) {
+	const pathwayJSON = `{
+		"nodes": [
+			{ "id": "start", "type": "Default", "data": { "name": "Start", "isStart": true, "prompt": "go" } },
+			{ "id": "normal_end", "type": "End Call", "data": { "name": "Normal End", "text": "normal" } },
+			{ "id": "alt_target", "type": "End Call", "data": { "name": "Alt Target", "text": "alternate" } }
+		],
+		"edges": [
+			{ "id": "e1", "source": "start", "target": "normal_end", "data": { "label": "continue" } }
+		]
+	}`
+
+	pp := mustParsePathway(t, pathwayJSON)
+	mock := pathwaytest.NewMockLLMClient()
+	mock.SetDefault(pathwaytest.MockResponse{Content: "executed"})
+
+	engine := pathwalk.NewEngine(pp, mock)
+	state := pathwalk.NewState("test tool route")
+
+	// Simulate what a node tool's response pathway does: set $tool_route.
+	state.Variables["$tool_route"] = "alt_target"
+
+	result, err := engine.Step(context.Background(), state, pp.StartNode.ID)
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+
+	// Should follow the tool route override, not the normal edge.
+	if result.NextNodeID != "alt_target" {
+		t.Errorf("expected NextNodeID=alt_target, got %q", result.NextNodeID)
+	}
+	if result.Step.RouteReason != "tool_response_pathway" {
+		t.Errorf("expected RouteReason=tool_response_pathway, got %q", result.Step.RouteReason)
+	}
+
+	// $tool_route should be cleaned up from state.
+	if _, exists := state.Variables["$tool_route"]; exists {
+		t.Error("$tool_route should be removed from state after use")
+	}
+}
+
+// TestStepToolRouteOverrideInvalidTarget verifies that when $tool_route points
+// to a nonexistent node, the engine falls through to normal routing.
+func TestStepToolRouteOverrideInvalidTarget(t *testing.T) {
+	pp := mustParsePathway(t, minimalPathwayJSON)
+	mock := pathwaytest.NewMockLLMClient()
+	mock.SetDefault(pathwaytest.MockResponse{Content: "ok"})
+
+	engine := pathwalk.NewEngine(pp, mock)
+	state := pathwalk.NewState("test invalid route")
+	state.Variables["$tool_route"] = "nonexistent_node"
+
+	result, err := engine.Step(context.Background(), state, pp.StartNode.ID)
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+
+	// Should fall through to normal edge routing (n1 → n2).
+	if result.NextNodeID != "n2" {
+		t.Errorf("expected fallback to normal routing (n2), got %q", result.NextNodeID)
+	}
+	// $tool_route should still be cleaned up.
+	if _, exists := state.Variables["$tool_route"]; exists {
+		t.Error("$tool_route should be removed from state even on invalid target")
+	}
+}

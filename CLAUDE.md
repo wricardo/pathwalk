@@ -163,7 +163,7 @@ executable `Tool` at runtime, performing the HTTP call with `{{variable}}` templ
 - `config.retries`: number of retry attempts on failure (0 = no retries)
 - `extractVars`: variables to extract from the webhook JSON response into state
 - `responsePathways`: conditional routing based on the tool's response:
-  - `"Default/Webhook Completion"` or `"default"` — always matches (fallback)
+  - `"default"` — always matches (fallback)
   - `"BlandStatusCode"` — matches on HTTP status code with an operator/value condition
   - When a pathway with a `nodeId` matches, it overrides normal edge-based routing
 

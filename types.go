@@ -139,9 +139,6 @@ type NodeTool struct {
 	// Variables to extract from the tool's response
 	ExtractVars []VariableDef
 
-	// ResponseData holds field paths to extract from the webhook response body.
-	ResponseData []string
-
 	// ResponsePathways defines conditional routing based on the tool's response.
 	// When Behavior is "feed_context", the LLM sees the result and continues.
 	// When pathways have conditions, a matching pathway can redirect the
@@ -153,7 +150,7 @@ type NodeTool struct {
 // It can act as a conditional offramp: if the response matches the condition,
 // route to the specified node instead of continuing normal flow.
 type ToolResponsePathway struct {
-	// Type is the trigger type: "Default/Webhook Completion" (always matches)
+	// Type is the trigger type: "default" (always matches)
 	// or "BlandStatusCode" (matches on HTTP status code).
 	Type string `json:"type"`
 

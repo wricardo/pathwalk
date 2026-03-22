@@ -67,7 +67,6 @@ type nodeToolJSON struct {
 		Body         string            `json:"body"`
 		Timeout      int               `json:"timeout"`
 		Retries      int               `json:"retries"`
-		ResponseData []string          `json:"response_data"`
 	} `json:"config"`
 
 	Speech           string            `json:"speech"`
@@ -310,10 +309,9 @@ func ParsePathwayBytes(data []byte) (*Pathway, error) {
 				Method:       rt.Config.Method,
 				Headers:      rt.Config.Headers,
 				Body:         rt.Config.Body,
-				Timeout:      rt.Config.Timeout,
-				Retries:      rt.Config.Retries,
-				ResponseData: rt.Config.ResponseData,
-				Speech:       rt.Speech,
+				Timeout: rt.Config.Timeout,
+				Retries: rt.Config.Retries,
+				Speech:  rt.Speech,
 			}
 			if nt.Method == "" {
 				nt.Method = "POST"

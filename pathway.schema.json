@@ -262,7 +262,7 @@
             "type": {
               "type": "string",
               "description": "'default' always matches. 'BlandStatusCode' matches on HTTP status code.",
-              "examples": ["default", "BlandStatusCode", "Default/Webhook Completion"]
+              "examples": ["default", "BlandStatusCode"]
             },
             "operator": {
               "type": "string",

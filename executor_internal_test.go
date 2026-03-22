@@ -700,14 +700,14 @@ func TestEvaluateResponsePathways(t *testing.T) {
 		{
 			name: "default pathway without nodeId is skipped",
 			pathways: []ToolResponsePathway{
-				{Type: "Default/Webhook Completion", NodeID: ""},
+				{Type: "default", NodeID: ""},
 			},
 			want: "",
 		},
 		{
 			name: "default pathway with nodeId matches",
 			pathways: []ToolResponsePathway{
-				{Type: "Default/Webhook Completion", NodeID: "error_handler"},
+				{Type: "default", NodeID: "error_handler"},
 			},
 			want: "error_handler",
 		},

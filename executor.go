@@ -513,7 +513,7 @@ func evaluateResponsePathways(pathways []ToolResponsePathway, statusCode int, _ 
 		}
 
 		switch rp.Type {
-		case "Default/Webhook Completion", "default", "":
+		case "default", "":
 			// Default pathway always matches (used as a fallback).
 			return rp.NodeID
 

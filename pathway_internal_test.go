@@ -280,9 +280,6 @@ func TestParsePathwayWithNodeTools(t *testing.T) {
 	if tool.Speech != "One moment please" {
 		t.Errorf("Speech = %q", tool.Speech)
 	}
-	if len(tool.ResponseData) != 2 {
-		t.Errorf("ResponseData len = %d, want 2", len(tool.ResponseData))
-	}
 	if len(tool.ExtractVars) != 1 || tool.ExtractVars[0].Name != "result_id" || !tool.ExtractVars[0].Required {
 		t.Errorf("ExtractVars = %+v", tool.ExtractVars)
 	}

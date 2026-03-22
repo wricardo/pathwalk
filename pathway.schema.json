@@ -1,0 +1,367 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/wricardo/pathwalk/pathway.schema.json",
+  "title": "Pathway",
+  "description": "A directed graph of nodes and edges executed by the pathwalk engine.",
+  "type": "object",
+  "required": ["nodes", "edges"],
+  "additionalProperties": false,
+  "properties": {
+    "nodes": {
+      "type": "array",
+      "description": "List of nodes in the pathway.",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/node" }
+    },
+    "edges": {
+      "type": "array",
+      "description": "List of directed edges connecting nodes.",
+      "items": { "$ref": "#/definitions/edge" }
+    },
+    "graphqlEndpoint": {
+      "type": "string",
+      "description": "Default GraphQL endpoint URL. Enables graphql_query and graphql_mutation tools.",
+      "format": "uri"
+    },
+    "maxTurns": {
+      "type": "integer",
+      "description": "Maximum number of node-to-node transitions. 0 means use the engine default (50).",
+      "minimum": 0
+    },
+    "maxVisitsPerNode": {
+      "type": "integer",
+      "description": "Default per-node visit cap applied to all nodes. 0 means no limit.",
+      "minimum": 0
+    }
+  },
+  "definitions": {
+    "node": {
+      "type": "object",
+      "required": ["id", "type", "data"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the node.",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "description": "Node type. 'Default' = LLM, 'End Call' = terminal, 'Webhook' = HTTP call, 'Route' = condition router.",
+          "enum": ["Default", "End Call", "Webhook", "Route"]
+        },
+        "data": { "$ref": "#/definitions/nodeData" },
+        "position": {
+          "type": "object",
+          "description": "Visual position (used by editors, ignored by the engine).",
+          "properties": {
+            "x": { "type": "number" },
+            "y": { "type": "number" }
+          }
+        }
+      }
+    },
+    "nodeData": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Human-readable node name.",
+          "minLength": 1
+        },
+        "isStart": {
+          "type": "boolean",
+          "description": "Marks this node as the entry point. Exactly one node must have isStart: true."
+        },
+        "isGlobal": {
+          "type": "boolean",
+          "description": "If true, this node can be activated from any point in the pathway when its globalLabel condition is triggered."
+        },
+        "globalLabel": {
+          "type": "string",
+          "description": "Human-readable label describing when to activate this global node."
+        },
+        "prompt": {
+          "type": "string",
+          "description": "System prompt for LLM nodes. Describes what the node should do."
+        },
+        "condition": {
+          "type": "string",
+          "description": "Exit condition hint given to the LLM for routing decisions."
+        },
+        "text": {
+          "type": "string",
+          "description": "Static text for terminal (End Call) nodes."
+        },
+        "maxVisits": {
+          "type": "integer",
+          "description": "Maximum times this node may be visited in a single run. Overrides the pathway-level maxVisitsPerNode.",
+          "minimum": 0
+        },
+        "modelOptions": {
+          "type": "object",
+          "description": "Per-node LLM model settings.",
+          "additionalProperties": true,
+          "properties": {
+            "newTemperature": {
+              "type": "number",
+              "description": "LLM temperature for this node.",
+              "minimum": 0,
+              "maximum": 2
+            }
+          }
+        },
+        "extractVars": {
+          "type": "array",
+          "description": "Variables to extract from the LLM response. Each element is a [name, type, description, required?] tuple.",
+          "items": { "$ref": "#/definitions/extractVarTuple" }
+        },
+        "tools": {
+          "type": "array",
+          "description": "Node-level tools visible only to this node's LLM call.",
+          "items": { "$ref": "#/definitions/nodeTool" }
+        },
+        "url": {
+          "type": "string",
+          "description": "Webhook node: target URL.",
+          "format": "uri"
+        },
+        "method": {
+          "type": "string",
+          "description": "Webhook node: HTTP method.",
+          "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]
+        },
+        "headers": {
+          "type": "object",
+          "description": "Webhook node: HTTP headers.",
+          "additionalProperties": { "type": "string" }
+        },
+        "body": {
+          "description": "Webhook node: request body (string or object)."
+        },
+        "routes": {
+          "type": "array",
+          "description": "Route node: ordered list of conditional routing rules.",
+          "items": { "$ref": "#/definitions/routeRule" }
+        },
+        "fallbackNodeId": {
+          "type": "string",
+          "description": "Route node: node to route to if no rule matches."
+        }
+      }
+    },
+    "extractVarTuple": {
+      "type": "array",
+      "description": "Variable extraction tuple: [name, type, description] or [name, type, description, required].",
+      "minItems": 3,
+      "maxItems": 4,
+      "items": [
+        { "type": "string", "description": "Variable name." },
+        { "type": "string", "description": "Variable type.", "enum": ["string", "integer", "boolean", "number", "array", "object"] },
+        { "type": "string", "description": "Human-readable description." }
+      ],
+      "additionalItems": {
+        "description": "Required flag (bool or 'true'/'false' string).",
+        "oneOf": [
+          { "type": "boolean" },
+          { "type": "string", "enum": ["true", "false"] }
+        ]
+      }
+    },
+    "nodeTool": {
+      "type": "object",
+      "required": ["name", "description", "type", "config"],
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Tool name exposed to the LLM (no spaces).",
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "description": {
+          "type": "string",
+          "description": "Description shown to the LLM explaining when and how to call the tool."
+        },
+        "type": {
+          "type": "string",
+          "description": "Tool implementation type. Currently only 'webhook' is supported.",
+          "enum": ["webhook", "custom_tool"]
+        },
+        "behavior": {
+          "type": "string",
+          "description": "How the tool response is handled. 'feed_context' returns the result to the LLM conversation.",
+          "enum": ["feed_context"]
+        },
+        "speech": {
+          "type": "string",
+          "description": "Optional text spoken while the tool executes (voice agents only)."
+        },
+        "config": { "$ref": "#/definitions/toolConfig" },
+        "extractVars": {
+          "type": "array",
+          "description": "Variables to extract from the tool's JSON response.",
+          "items": { "$ref": "#/definitions/extractVarTuple" }
+        },
+        "responsePathways": {
+          "type": "array",
+          "description": "Conditional routing rules triggered by the tool's response.",
+          "items": { "$ref": "#/definitions/toolResponsePathway" }
+        }
+      }
+    },
+    "toolConfig": {
+      "type": "object",
+      "required": ["url"],
+      "additionalProperties": true,
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "Target URL. Supports {{variable}} template substitution.",
+          "minLength": 1
+        },
+        "method": {
+          "type": "string",
+          "description": "HTTP method. Defaults to POST.",
+          "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]
+        },
+        "headers": {
+          "type": "object",
+          "description": "HTTP headers. Values support {{variable}} substitution.",
+          "additionalProperties": { "type": "string" }
+        },
+        "body": {
+          "type": "string",
+          "description": "Request body template. Supports {{variable}} substitution."
+        },
+        "timeout": {
+          "type": "integer",
+          "description": "HTTP timeout in seconds. 0 uses the default (30s).",
+          "minimum": 0
+        },
+        "retries": {
+          "type": "integer",
+          "description": "Number of retry attempts on failure. 0 means no retries.",
+          "minimum": 0
+        },
+        "response_data": {
+          "type": "array",
+          "description": "Field paths to extract from the webhook JSON response.",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "toolResponsePathway": {
+      "description": "A conditional routing rule based on the tool's response (object or legacy tuple format).",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type"],
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "description": "'default' always matches. 'BlandStatusCode' matches on HTTP status code.",
+              "examples": ["default", "BlandStatusCode", "Default/Webhook Completion"]
+            },
+            "operator": {
+              "type": "string",
+              "description": "Comparison operator.",
+              "enum": ["==", "!=", ">", "<", ">=", "<=", "contains", "!contains", "is"]
+            },
+            "value": {
+              "type": "string",
+              "description": "Value to compare against (e.g. '200', '409')."
+            },
+            "nodeId": {
+              "type": "string",
+              "description": "Target node ID to route to when this pathway matches. Empty means continue normal flow."
+            },
+            "name": {
+              "type": "string",
+              "description": "Human-readable label for this pathway."
+            }
+          }
+        },
+        {
+          "type": "array",
+          "description": "Legacy Bland tuple format: [type, operator, value, {id, name}].",
+          "minItems": 1
+        }
+      ]
+    },
+    "routeRule": {
+      "type": "object",
+      "required": ["conditions", "targetNodeId"],
+      "additionalProperties": false,
+      "properties": {
+        "conditions": {
+          "type": "array",
+          "description": "All conditions must be true (AND logic) for this rule to match.",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/routeCondition" }
+        },
+        "targetNodeId": {
+          "type": "string",
+          "description": "Node ID to route to when all conditions match."
+        }
+      }
+    },
+    "routeCondition": {
+      "type": "object",
+      "required": ["field", "operator", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "type": "string",
+          "description": "Name of the state variable to evaluate."
+        },
+        "operator": {
+          "type": "string",
+          "description": "Comparison operator.",
+          "enum": ["is", "is not", "contains", "not contains", ">", "<", ">=", "<=", "equals", "!=", "=="]
+        },
+        "value": {
+          "type": "string",
+          "description": "Value to compare the field against."
+        }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "required": ["id", "source", "target"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique edge identifier.",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "description": "ID of the source node.",
+          "minLength": 1
+        },
+        "target": {
+          "type": "string",
+          "description": "ID of the target node.",
+          "minLength": 1
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "label": {
+              "type": "string",
+              "description": "Short label shown on the edge in visual editors."
+            },
+            "description": {
+              "type": "string",
+              "description": "Longer description used by the routing LLM to choose this edge."
+            }
+          }
+        }
+      }
+    }
+  }
+}

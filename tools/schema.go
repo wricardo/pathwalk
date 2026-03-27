@@ -25,7 +25,7 @@ func (t *GraphQLTool) AsTools() []pathwalk.Tool {
 // queriesListTool returns a tool that lists available queries with their signatures.
 func (t *GraphQLTool) queriesListTool() pathwalk.Tool {
 	return pathwalk.Tool{
-		Name:        "graphql_queries",
+		Name:        t.toolName("graphql_queries"),
 		Description: "List available GraphQL queries with argument types and return types. Use before writing a query to know what fields exist.",
 		Parameters: map[string]any{
 			"type": "object",
@@ -62,7 +62,7 @@ func (t *GraphQLTool) queriesListTool() pathwalk.Tool {
 // mutationsListTool returns a tool that lists available mutations with their signatures.
 func (t *GraphQLTool) mutationsListTool() pathwalk.Tool {
 	return pathwalk.Tool{
-		Name:        "graphql_mutations",
+		Name:        t.toolName("graphql_mutations"),
 		Description: "List available GraphQL mutations with argument types and return types. Use before writing a mutation to know what fields and input types exist.",
 		Parameters: map[string]any{
 			"type": "object",
@@ -99,7 +99,7 @@ func (t *GraphQLTool) mutationsListTool() pathwalk.Tool {
 // typesListTool returns a tool that lists all named non-built-in GraphQL types.
 func (t *GraphQLTool) typesListTool() pathwalk.Tool {
 	return pathwalk.Tool{
-		Name:        "graphql_types",
+		Name:        t.toolName("graphql_types"),
 		Description: "List all named GraphQL types (objects, inputs, enums, interfaces). Use to discover type names before calling graphql_type.",
 		Parameters: map[string]any{
 			"type": "object",
@@ -131,7 +131,7 @@ func (t *GraphQLTool) typesListTool() pathwalk.Tool {
 // and expands non-scalar field types 2 levels deep.
 func (t *GraphQLTool) typeDescribeTool() pathwalk.Tool {
 	return pathwalk.Tool{
-		Name:        "graphql_type",
+		Name:        t.toolName("graphql_type"),
 		Description: "Describe a GraphQL type with its fields. Non-scalar field types are expanded 2 levels deep so a single call reveals the full shape of nested types.",
 		Parameters: map[string]any{
 			"type": "object",

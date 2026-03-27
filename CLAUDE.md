@@ -121,3 +121,50 @@ Key `node.data` fields:
 `extractVars` tuple format: `[name(string), type("string"|"integer"|"boolean"), description(string), required(bool)]`
 
 Route condition operators: `"is"`, `"is not"`, `"contains"`, `"not contains"`, `">"`, `"<"`, `">="`, `"<="`
+
+## Node-Level Tools
+
+Nodes can declare tools in `node.data.tools`. These are scoped to the node — the LLM only sees them
+when executing that specific node. They are merged with any global tools registered via `WithTools()`.
+
+Currently only `"webhook"` type tools are supported. The engine converts each `NodeTool` into an
+executable `Tool` at runtime, performing the HTTP call with `{{variable}}` template substitution.
+
+```json
+{
+  "tools": [
+    {
+      "name": "save_customer",
+      "description": "Save customer data. Call when name and email are confirmed.",
+      "type": "webhook",
+      "behavior": "feed_context",
+      "config": {
+        "url": "https://api.example.com/customers",
+        "method": "POST",
+        "headers": { "Content-Type": "application/json" },
+        "body": "{\"name\": \"{{customer_name}}\", \"email\": \"{{customer_email}}\"}",
+        "timeout": 10,
+        "retries": 1
+      },
+      "extractVars": [["customer_id", "string", "Assigned customer ID", true]],
+      "responsePathways": [
+        { "type": "BlandStatusCode", "operator": "==", "value": "409", "nodeId": "already_exists" },
+        { "type": "default", "nodeId": "" }
+      ]
+    }
+  ]
+}
+```
+
+**Key fields:**
+- `type`: `"webhook"` — makes an HTTP call with the configured method/URL/body
+- `behavior`: `"feed_context"` — the response is fed back to the LLM conversation
+- `config.timeout`: per-tool HTTP timeout in seconds (0 = default 30s)
+- `config.retries`: number of retry attempts on failure (0 = no retries)
+- `extractVars`: variables to extract from the webhook JSON response into state
+- `responsePathways`: conditional routing based on the tool's response:
+  - `"default"` — always matches (fallback)
+  - `"BlandStatusCode"` — matches on HTTP status code with an operator/value condition
+  - When a pathway with a `nodeId` matches, it overrides normal edge-based routing
+
+See `examples/node_tools_example.json` for a complete working example.

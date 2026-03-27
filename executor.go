@@ -48,13 +48,23 @@ func executeLLM(ctx context.Context, node *Node, state *State, llm LLMClient, to
 	systemPrompt := buildSystemPrompt(node, state)
 	userMsg := buildUserMessage(state)
 
+	// Merge global tools with node-level tools.
+	allTools := tools
+	if len(node.Tools) > 0 {
+		allTools = make([]Tool, len(tools))
+		copy(allTools, tools)
+		for _, nt := range node.Tools {
+			allTools = append(allTools, nodeToolToTool(nt, state, log))
+		}
+	}
+
 	req := CompletionRequest{
 		Model:    "",
 		Messages: []Message{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userMsg},
 		},
-		Tools:       tools,
+		Tools:       allTools,
 		Temperature: node.Temperature,
 	}
 
@@ -369,4 +379,177 @@ func resolveTemplate(s string, vars map[string]any) string {
 		s = strings.ReplaceAll(s, placeholder, fmt.Sprintf("%v", v))
 	}
 	return s
+}
+
+// nodeToolToTool converts a declarative NodeTool (from pathway JSON) into an
+// executable Tool. Currently only "webhook" type tools are supported.
+func nodeToolToTool(nt NodeTool, state *State, log *slog.Logger) Tool {
+	return Tool{
+		Name:        nt.Name,
+		Description: nt.Description,
+		Parameters: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{},
+		},
+		Fn: func(ctx context.Context, args map[string]any) (any, error) {
+			if nt.Type != "webhook" {
+				return nil, fmt.Errorf("unsupported node tool type: %s", nt.Type)
+			}
+
+			result, statusCode, err := executeNodeToolWebhook(ctx, nt, state, args, log)
+			if err != nil {
+				return nil, err
+			}
+
+			// Extract variables from the response if configured.
+			if len(nt.ExtractVars) > 0 {
+				if m, ok := result.(map[string]any); ok {
+					extracted := map[string]any{}
+					for _, vd := range nt.ExtractVars {
+						if v, exists := m[vd.Name]; exists {
+							extracted[vd.Name] = v
+						}
+					}
+					if len(extracted) > 0 {
+						state.SetVars(extracted)
+					}
+				}
+			}
+
+			// Evaluate response pathways for conditional routing.
+			if routeNodeID := evaluateResponsePathways(nt.ResponsePathways, statusCode, result); routeNodeID != "" {
+				state.SetVars(map[string]any{"$tool_route": routeNodeID})
+				log.Debug("response pathway matched", "tool", nt.Name, "routeTo", routeNodeID)
+			}
+
+			return result, nil
+		},
+	}
+}
+
+// executeNodeToolWebhook performs the HTTP call for a webhook NodeTool with
+// timeout and retry support. Returns the parsed response body and HTTP status code.
+func executeNodeToolWebhook(ctx context.Context, nt NodeTool, state *State, args map[string]any, log *slog.Logger) (any, int, error) {
+	// Merge state vars with tool-call args for template resolution.
+	mergedVars := make(map[string]any, len(state.Variables)+len(args))
+	for k, v := range state.Variables {
+		mergedVars[k] = v
+	}
+	for k, v := range args {
+		mergedVars[k] = v
+	}
+
+	body := resolveTemplate(nt.Body, mergedVars)
+
+	method := nt.Method
+	if method == "" {
+		method = "POST"
+	}
+
+	// Build an HTTP client with per-tool timeout if configured.
+	client := webhookClient
+	if nt.Timeout > 0 {
+		client = &http.Client{Timeout: time.Duration(nt.Timeout) * time.Second}
+	}
+
+	maxAttempts := 1 + nt.Retries
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			log.Debug("retrying node tool webhook", "tool", nt.Name, "attempt", attempt+1)
+		}
+
+		req, err := http.NewRequestWithContext(ctx, method, nt.URL, strings.NewReader(body))
+		if err != nil {
+			return nil, 0, fmt.Errorf("node tool %q request: %w", nt.Name, err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range nt.Headers {
+			req.Header.Set(k, v)
+		}
+
+		log.Debug("executing node tool webhook", "tool", nt.Name, "url", nt.URL)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("node tool %q HTTP: %w", nt.Name, err)
+			continue
+		}
+
+		respBytes, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("node tool %q read body: %w", nt.Name, err)
+			continue
+		}
+
+		var respData any
+		if err := json.Unmarshal(respBytes, &respData); err != nil {
+			respData = string(respBytes)
+		}
+
+		if resp.StatusCode >= 400 {
+			lastErr = fmt.Errorf("node tool %q returned status %d: %s", nt.Name, resp.StatusCode, respBytes)
+			// Still return the response data and status for pathway evaluation,
+			// but only on the last attempt.
+			if attempt == maxAttempts-1 {
+				return respData, resp.StatusCode, nil
+			}
+			continue
+		}
+
+		return respData, resp.StatusCode, nil
+	}
+
+	return nil, 0, lastErr
+}
+
+// evaluateResponsePathways checks response pathways for a matching condition.
+// Returns the target node ID if a pathway matches, or "" if none match.
+func evaluateResponsePathways(pathways []ToolResponsePathway, statusCode int, _ any) string {
+	for _, rp := range pathways {
+		if rp.NodeID == "" {
+			continue // no routing target
+		}
+
+		switch rp.Type {
+		case "default", "":
+			// Default pathway always matches (used as a fallback).
+			return rp.NodeID
+
+		case "BlandStatusCode":
+			if rp.Operator == "" {
+				continue
+			}
+			actual := fmt.Sprintf("%d", statusCode)
+			if matchCondition(actual, rp.Operator, rp.Value) {
+				return rp.NodeID
+			}
+		}
+	}
+	return ""
+}
+
+// matchCondition evaluates a single operator/value condition against an actual value.
+func matchCondition(actual, operator, expected string) bool {
+	switch operator {
+	case "==", "is":
+		return actual == expected
+	case "!=":
+		return actual != expected
+	case "contains":
+		return strings.Contains(actual, expected)
+	case "!contains":
+		return !strings.Contains(actual, expected)
+	case ">":
+		return actual > expected
+	case "<":
+		return actual < expected
+	case ">=":
+		return actual >= expected
+	case "<=":
+		return actual <= expected
+	default:
+		return false
+	}
 }

@@ -1,0 +1,133 @@
+{
+  "nodes": [
+    {
+      "id": "start",
+      "type": "Default",
+      "data": {
+        "name": "Welcome",
+        "isStart": true,
+        "prompt": "You are a pizzeria assistant. Use the get_dashboard tool to fetch today's stats, then greet the customer with a brief summary. Ask what they need: see the menu, check inventory, or get a full report.",
+        "condition": "Exit after greeting and understanding what the customer wants.",
+        "tools": [
+          {
+            "name": "get_dashboard",
+            "description": "Fetch today's pizzeria dashboard stats (total orders, revenue, low inventory count).",
+            "type": "webhook",
+            "behavior": "feed_context",
+            "config": {
+              "url": "http://localhost:4000/graphql",
+              "method": "POST",
+              "headers": { "Content-Type": "application/json" },
+              "body": "{\"query\": \"{ dashboard { totalOrders completedToday lowInventoryCount totalRevenue bottomLine } }\"}",
+              "timeout": 10
+            },
+            "extractVars": [],
+            "responsePathways": [
+              { "type": "default", "nodeId": "" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "show_menu",
+      "type": "Default",
+      "data": {
+        "name": "Show Menu",
+        "prompt": "Use the list_pizzas tool to fetch the menu and present it to the customer with names and prices.",
+        "condition": "Exit after showing the menu.",
+        "tools": [
+          {
+            "name": "list_pizzas",
+            "description": "List all pizzas on the menu with IDs, names, and prices.",
+            "type": "webhook",
+            "behavior": "feed_context",
+            "config": {
+              "url": "http://localhost:4000/graphql",
+              "method": "POST",
+              "headers": { "Content-Type": "application/json" },
+              "body": "{\"query\": \"{ pizzas { id name price } }\"}",
+              "timeout": 10
+            },
+            "extractVars": [],
+            "responsePathways": [
+              { "type": "default", "nodeId": "" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "check_inventory",
+      "type": "Default",
+      "data": {
+        "name": "Check Inventory",
+        "prompt": "Use the list_inventory tool to fetch all ingredients and report their stock levels. Flag any ingredients running low (current < 20% of max).",
+        "condition": "Exit after reporting stock levels.",
+        "tools": [
+          {
+            "name": "list_inventory",
+            "description": "Fetch all ingredients with current stock levels and maximum capacity.",
+            "type": "webhook",
+            "behavior": "feed_context",
+            "config": {
+              "url": "http://localhost:4000/graphql",
+              "method": "POST",
+              "headers": { "Content-Type": "application/json" },
+              "body": "{\"query\": \"{ inventory { id name unit current max costPerUnit } }\"}",
+              "timeout": 10
+            },
+            "extractVars": [],
+            "responsePathways": [
+              { "type": "default", "nodeId": "" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "full_report",
+      "type": "Default",
+      "data": {
+        "name": "Full Report",
+        "prompt": "Generate a full operational report. Use the get_orders tool to list all current orders, then summarize by status, total revenue, and any issues.",
+        "condition": "Exit after presenting the report.",
+        "tools": [
+          {
+            "name": "get_orders",
+            "description": "Fetch all orders with status, customer, revenue, and cost details.",
+            "type": "webhook",
+            "behavior": "feed_context",
+            "config": {
+              "url": "http://localhost:4000/graphql",
+              "method": "POST",
+              "headers": { "Content-Type": "application/json" },
+              "body": "{\"query\": \"{ orders { id customer status revenue cost items { pizzaId quantity } } }\"}",
+              "timeout": 10
+            },
+            "extractVars": [],
+            "responsePathways": [
+              { "type": "default", "nodeId": "" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "end",
+      "type": "End Call",
+      "data": {
+        "name": "Done",
+        "text": "Thanks for checking in! Have a great day."
+      }
+    }
+  ],
+  "edges": [
+    { "id": "e1", "source": "start", "target": "show_menu", "data": { "label": "Show Menu", "description": "The customer asked about the pizza menu, available pizzas, or what they can order" } },
+    { "id": "e2", "source": "start", "target": "check_inventory", "data": { "label": "Check Inventory", "description": "The customer asked about ingredient stock, inventory levels, or supply status" } },
+    { "id": "e3", "source": "start", "target": "full_report", "data": { "label": "Full Report", "description": "The customer asked for an operational report, order summary, or business overview" } },
+    { "id": "e4", "source": "show_menu", "target": "end", "data": { "label": "done" } },
+    { "id": "e5", "source": "check_inventory", "target": "end", "data": { "label": "done" } },
+    { "id": "e6", "source": "full_report", "target": "end", "data": { "label": "done" } }
+  ]
+}

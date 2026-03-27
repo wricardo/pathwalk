@@ -17,6 +17,7 @@ func main() {
 		Usage: "Execute conversational pathway JSON files as an agentic pipeline",
 		Commands: []*cli.Command{
 			runCmd(),
+			validateCmd(),
 		},
 	}
 
@@ -161,4 +162,46 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+func validateCmd() *cli.Command {
+	return &cli.Command{
+		Name:      "validate",
+		Usage:     "Validate a pathway JSON file against the schema and structural rules",
+		ArgsUsage: "<pathway.json>",
+		Action: func(c *cli.Context) error {
+			if c.NArg() == 0 {
+				return fmt.Errorf("usage: pathwalk validate <pathway.json>")
+			}
+			path := c.Args().First()
+
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return fmt.Errorf("reading file: %w", err)
+			}
+
+			result := pathwalk.ValidatePathwayBytes(data)
+
+			if len(result.SchemaErrors) > 0 {
+				fmt.Fprintf(os.Stderr, "Schema errors:\n")
+				for _, e := range result.SchemaErrors {
+					fmt.Fprintf(os.Stderr, "  - %s\n", e)
+				}
+			} else {
+				fmt.Printf("Schema: ok\n")
+			}
+
+			if result.ParseError != nil {
+				fmt.Fprintf(os.Stderr, "Parse error: %s\n", result.ParseError)
+			} else {
+				fmt.Printf("Parse:  ok\n")
+			}
+
+			if !result.Valid() {
+				os.Exit(1)
+			}
+			fmt.Printf("%s is valid\n", path)
+			return nil
+		},
+	}
 }

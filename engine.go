@@ -216,6 +216,32 @@ func (e *Engine) Step(ctx context.Context, state *State, nodeID string) (*StepRe
 		}, nil
 	}
 
+	// Check if a response pathway set a routing override via $tool_route.
+	if routeNodeID, ok := state.Variables["$tool_route"].(string); ok && routeNodeID != "" {
+		delete(state.Variables, "$tool_route")
+		if _, exists := e.pathway.NodeByID[routeNodeID]; exists {
+			stepLog.Debug("tool response pathway override", "from", currentNode.Name, "to", routeNodeID)
+
+			sl := Step{
+				NodeID:      currentNode.ID,
+				NodeName:    currentNode.Name,
+				Output:      out.Text,
+				Vars:        copyVars(out.Vars),
+				ToolCalls:   out.ToolCalls,
+				RouteReason: "tool_response_pathway",
+				NextNode:    routeNodeID,
+			}
+			state.Steps = append(state.Steps, sl)
+			return &StepResult{
+				Step:       sl,
+				NextNodeID: routeNodeID,
+				Output:     out.Text,
+				Logs:       lc.flush(),
+			}, nil
+		}
+		stepLog.Warn("tool response pathway target not found", "nodeId", routeNodeID)
+	}
+
 	// Route to next node
 	nextNodeID, routeReason, err := chooseNextNode(ctx, currentNode, out, state, edges, e.llm, stepLog)
 	if err != nil {

@@ -86,6 +86,9 @@ type Node struct {
 	WebhookHeaders map[string]string
 	WebhookBody    any
 
+	// Node-level tools (parsed from JSON, scoped to this node only)
+	Tools []NodeTool
+
 	// Route node
 	Routes         []RouteRule
 	FallbackNodeID string
@@ -107,6 +110,62 @@ type Tool struct {
 	Description string
 	Parameters  map[string]any // JSON schema
 	Fn          func(ctx context.Context, args map[string]any) (any, error)
+}
+
+// NodeTool is a declarative tool definition attached to a specific node in the
+// pathway JSON. Unlike Tool, it carries no Go function — the engine constructs
+// an executable Tool from the config at runtime (e.g. performing a webhook call).
+type NodeTool struct {
+	Name        string
+	Description string
+	Type        string // "webhook" or "custom_tool"
+	Behavior    string // "feed_context" — response fed back into conversation
+
+	// Webhook config
+	URL     string
+	Method  string
+	Headers map[string]string
+	Body    string // raw body template with {{variable}} placeholders
+
+	// Timeout in seconds for the HTTP request. 0 means use the default (30s).
+	Timeout int
+	// Retries is the number of retry attempts on failure. 0 means no retries.
+	Retries int
+
+	// Speech is optional text the agent speaks while the tool executes
+	// (relevant for voice agents; ignored by the default engine).
+	Speech string
+
+	// Variables to extract from the tool's response
+	ExtractVars []VariableDef
+
+	// ResponsePathways defines conditional routing based on the tool's response.
+	// When Behavior is "feed_context", the LLM sees the result and continues.
+	// When pathways have conditions, a matching pathway can redirect the
+	// conversation to a different node, overriding normal edge-based routing.
+	ResponsePathways []ToolResponsePathway
+}
+
+// ToolResponsePathway describes how to handle a tool's response.
+// It can act as a conditional offramp: if the response matches the condition,
+// route to the specified node instead of continuing normal flow.
+type ToolResponsePathway struct {
+	// Type is the trigger type: "default" (always matches)
+	// or "BlandStatusCode" (matches on HTTP status code).
+	Type string `json:"type"`
+
+	// Condition operator: "==", "!=", ">", "<", ">=", "<=", "contains", "!contains", "is".
+	// Empty means no condition (always matches).
+	Operator string `json:"operator,omitempty"`
+
+	// Value to compare against (e.g. "200", "error").
+	Value string `json:"value,omitempty"`
+
+	// NodeID is the target node to route to when the condition matches.
+	NodeID string `json:"nodeId"`
+
+	// Name is a human-readable label for this pathway.
+	Name string `json:"name,omitempty"`
 }
 
 // ToolCall records a single tool invocation and its outcome.

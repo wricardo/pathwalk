@@ -595,6 +595,27 @@ Run the tests:
 go test ./...
 ```
 
+## Claude Code skill
+
+A `pathwalk-engineer` skill is bundled in this repo. It covers the pathway JSON format, engine API, testing patterns, tools, and Temporal integration — useful when building with pathwalk in any project.
+
+### Install
+
+```
+/plugin marketplace add wricardo/pathwalk
+/plugin install pathwalk-engineer@pathwalk
+```
+
+Then invoke it with `/pathwalk-engineer` in any Claude Code session.
+
+### Manual install (copy)
+
+```bash
+cp -r .claude-plugin/../../plugins/pathwalk-engineer/skills/pathwalk-engineer ~/.claude/skills/
+```
+
+Or if you cloned this repo, Claude Code will prompt you to install the plugin automatically via `.claude/settings.json`.
+
 ## Examples
 
 | File | Description |

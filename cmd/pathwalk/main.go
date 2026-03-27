@@ -46,7 +46,7 @@ func runCmd() *cli.Command {
 			&cli.StringFlag{
 				Name:  "model",
 				Usage: "LLM model name",
-				Value: "gpt-4o",
+				Value: "qwen/qwen3.5-35b-a3b",
 			},
 			&cli.StringFlag{
 				Name:    "api-key",
@@ -55,7 +55,7 @@ func runCmd() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "base-url",
-				Usage:   "Base URL for the LLM API",
+				Usage:   "Base URL for an OpenAI-compatible LLM API",
 				EnvVars: []string{"OPENAI_BASE_URL"},
 			},
 			&cli.IntFlag{

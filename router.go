@@ -250,6 +250,18 @@ func conditionMet(c RouteCondition, vars map[string]any) bool {
 	return false
 }
 
+// isKnownOperator returns true if op is a recognised route condition operator.
+func isKnownOperator(op string) bool {
+	switch strings.ToLower(op) {
+	case "is", "equals", "==",
+		"is not", "not equals", "!=",
+		"contains", "not contains",
+		">", ">=", "<", "<=":
+		return true
+	}
+	return false
+}
+
 // parseFloatPair parses two strings as float64. Returns false if either fails to parse.
 func parseFloatPair(a, b string) (float64, float64, bool) {
 	fa, err := strconv.ParseFloat(a, 64)

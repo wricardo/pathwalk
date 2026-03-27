@@ -1165,8 +1165,9 @@ func TestParsePathwayBytesNoStartNode(t *testing.T) {
 // ── Engine Run edge cases ─────────────────────────────────────────────────────
 
 // TestRunMissingStartNode verifies that an engine whose Pathway.StartNode is nil
-// immediately returns Reason="missing_node". ParsePathwayBytes rejects pathways
-// without a start node, so this test constructs the struct directly.
+// immediately returns Reason="missing_node" with a non-nil error.
+// ParsePathwayBytes rejects pathways without a start node, so this test
+// constructs the struct directly.
 func TestRunMissingStartNode(t *testing.T) {
 	pp := &pathwalk.Pathway{
 		NodeByID:  make(map[string]*pathwalk.Node),
@@ -1174,8 +1175,8 @@ func TestRunMissingStartNode(t *testing.T) {
 	}
 	mock := pathwaytest.NewMockLLMClient()
 	result, err := pathwalk.NewEngine(pp, mock).Run(context.Background(), "test")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for pathway with no start node, got nil")
 	}
 	if result.Reason != "missing_node" {
 		t.Errorf("expected reason=missing_node, got %q", result.Reason)
@@ -1297,13 +1298,9 @@ func TestRunRoutingError(t *testing.T) {
 	}
 }
 
-// TestRunNextNodeNotFound verifies that when the route returns a node ID that
-// does not exist in the pathway, Run returns an error.
-//
-// The Route node must have at least one outgoing edge so that chooseNextNode
-// does not short-circuit on "no outgoing edges" before calling evaluateRouteNode.
-// evaluateRouteNode then returns the FallbackNodeID ("ghost"), which is absent
-// from NodeByID, triggering the not-found error path.
+// TestRunNextNodeNotFound verifies that a pathway whose Route node references a
+// non-existent fallback node is rejected at parse time with an error mentioning
+// the missing node ID.
 func TestRunNextNodeNotFound(t *testing.T) {
 	const badFallbackJSON = `{
   "nodes": [
@@ -1316,13 +1313,9 @@ func TestRunNextNodeNotFound(t *testing.T) {
     { "id": "e2", "source": "router", "target": "real",   "data": {} }
   ]
 }`
-	pp := mustParsePathway(t, badFallbackJSON)
-	mock := pathwaytest.NewMockLLMClient()
-	mock.SetDefault(pathwaytest.MockResponse{Content: "ok"})
-
-	_, err := pathwalk.NewEngine(pp, mock).Run(context.Background(), "test")
+	_, err := pathwalk.ParsePathwayBytes([]byte(badFallbackJSON))
 	if err == nil {
-		t.Fatal("expected error when next node is not found in NodeByID, got nil")
+		t.Fatal("expected parse error for pathway with non-existent fallback node, got nil")
 	}
 	if !strings.Contains(err.Error(), "ghost") {
 		t.Errorf("expected error to mention 'ghost', got: %v", err)
@@ -1668,12 +1661,9 @@ func TestVerboseExtractVars(t *testing.T) {
 }
 
 // TestParsePathwayInvalidExtractVars verifies that malformed extractVars tuples
-// (wrong type or too few elements) are silently skipped via the continue branch
-// in ParsePathwayBytes.
+// cause ParsePathwayBytes to return an error (fail fast).
 func TestParsePathwayInvalidExtractVars(t *testing.T) {
-	// 123 is not a JSON array → json.Unmarshal fails → continue
-	// ["a","b"] has only 2 elements → len(tuple) < 3 → continue
-	// ["my_var","string","desc"] is valid and should be preserved
+	// 123 is not a JSON array → malformed → error
 	raw := `{
   "nodes": [
     {
@@ -1683,23 +1673,64 @@ func TestParsePathwayInvalidExtractVars(t *testing.T) {
         "name": "Start",
         "isStart": true,
         "prompt": "do something",
-        "extractVars": [123, ["a","b"], ["my_var","string","description"]]
+        "extractVars": [123, ["my_var","string","description"]]
       }
     },
     {"id": "end", "type": "End Call", "data": {"name": "Done", "text": "done"}}
   ],
   "edges": [{"id": "e1", "source": "n1", "target": "end", "data": {}}]
 }`
-	pp, err := pathwalk.ParsePathwayBytes([]byte(raw))
+	_, err := pathwalk.ParsePathwayBytes([]byte(raw))
+	if err == nil {
+		t.Fatal("expected error for malformed extractVars tuple, got nil")
+	}
+
+	// A tuple with only 2 elements is also malformed.
+	raw2 := `{
+  "nodes": [
+    {
+      "id": "n1",
+      "type": "Default",
+      "data": {
+        "name": "Start",
+        "isStart": true,
+        "prompt": "do something",
+        "extractVars": [["a","b"]]
+      }
+    },
+    {"id": "end", "type": "End Call", "data": {"name": "Done", "text": "done"}}
+  ],
+  "edges": [{"id": "e1", "source": "n1", "target": "end", "data": {}}]
+}`
+	_, err = pathwalk.ParsePathwayBytes([]byte(raw2))
+	if err == nil {
+		t.Fatal("expected error for short extractVars tuple, got nil")
+	}
+
+	// A valid tuple should parse without error.
+	raw3 := `{
+  "nodes": [
+    {
+      "id": "n1",
+      "type": "Default",
+      "data": {
+        "name": "Start",
+        "isStart": true,
+        "prompt": "do something",
+        "extractVars": [["my_var","string","description"]]
+      }
+    },
+    {"id": "end", "type": "End Call", "data": {"name": "Done", "text": "done"}}
+  ],
+  "edges": [{"id": "e1", "source": "n1", "target": "end", "data": {}}]
+}`
+	pp, err := pathwalk.ParsePathwayBytes([]byte(raw3))
 	if err != nil {
-		t.Fatalf("ParsePathwayBytes: %v", err)
+		t.Fatalf("unexpected error for valid extractVars: %v", err)
 	}
 	n := pp.NodeByID["n1"]
-	if len(n.ExtractVars) != 1 {
-		t.Errorf("expected 1 valid extractVar, got %d", len(n.ExtractVars))
-	}
-	if len(n.ExtractVars) > 0 && n.ExtractVars[0].Name != "my_var" {
-		t.Errorf("expected name=my_var, got %q", n.ExtractVars[0].Name)
+	if len(n.ExtractVars) != 1 || n.ExtractVars[0].Name != "my_var" {
+		t.Errorf("expected ExtractVars=[{my_var}], got %+v", n.ExtractVars)
 	}
 }
 
@@ -2135,5 +2166,185 @@ func TestStepToolRouteOverrideInvalidTarget(t *testing.T) {
 	// $tool_route should still be cleaned up.
 	if _, exists := state.Variables["$tool_route"]; exists {
 		t.Error("$tool_route should be removed from state even on invalid target")
+	}
+}
+
+// ── NewEngine nil-input panics ────────────────────────────────────────────────
+
+// TestNewEngineNilPathwayPanics verifies that passing a nil pathway panics immediately.
+func TestNewEngineNilPathwayPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for nil pathway, got none")
+		}
+	}()
+	mock := pathwaytest.NewMockLLMClient()
+	pathwalk.NewEngine(nil, mock) //nolint:staticcheck
+}
+
+// TestNewEngineNilLLMPanics verifies that passing a nil LLM client panics immediately.
+func TestNewEngineNilLLMPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for nil llm, got none")
+		}
+	}()
+	pp := &pathwalk.Pathway{
+		NodeByID:  make(map[string]*pathwalk.Node),
+		EdgesFrom: make(map[string][]*pathwalk.Edge),
+	}
+	pathwalk.NewEngine(pp, nil) //nolint:staticcheck
+}
+
+// ── ParsePathwayBytes referential integrity ───────────────────────────────────
+
+// TestParsePathwayEdgeUnknownSource verifies that an edge referencing a
+// non-existent source node is rejected at parse time.
+func TestParsePathwayEdgeUnknownSource(t *testing.T) {
+	raw := `{
+  "nodes": [
+    {"id": "start", "type": "Default",  "data": {"name": "Start", "isStart": true, "prompt": "go"}},
+    {"id": "end",   "type": "End Call", "data": {"name": "End",   "text": "done"}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "ghost", "target": "end", "data": {}}
+  ]
+}`
+	_, err := pathwalk.ParsePathwayBytes([]byte(raw))
+	if err == nil {
+		t.Fatal("expected error for edge with unknown source node, got nil")
+	}
+	if !strings.Contains(err.Error(), "ghost") {
+		t.Errorf("expected error to mention 'ghost', got: %v", err)
+	}
+}
+
+// TestParsePathwayEdgeUnknownTarget verifies that an edge referencing a
+// non-existent target node is rejected at parse time.
+func TestParsePathwayEdgeUnknownTarget(t *testing.T) {
+	raw := `{
+  "nodes": [
+    {"id": "start", "type": "Default",  "data": {"name": "Start", "isStart": true, "prompt": "go"}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "start", "target": "phantom", "data": {}}
+  ]
+}`
+	_, err := pathwalk.ParsePathwayBytes([]byte(raw))
+	if err == nil {
+		t.Fatal("expected error for edge with unknown target node, got nil")
+	}
+	if !strings.Contains(err.Error(), "phantom") {
+		t.Errorf("expected error to mention 'phantom', got: %v", err)
+	}
+}
+
+// TestParsePathwayRouteTargetUnknown verifies that a Route node whose rule
+// targetNodeId references a non-existent node is rejected at parse time.
+func TestParsePathwayRouteTargetUnknown(t *testing.T) {
+	raw := `{
+  "nodes": [
+    {"id": "start",  "type": "Default", "data": {"name": "Start",  "isStart": true, "prompt": "go"}},
+    {"id": "router", "type": "Route",   "data": {"name": "Router",
+      "routes": [{"conditions": [{"field": "x", "operator": "is", "value": "y"}], "targetNodeId": "missing"}]
+    }}
+  ],
+  "edges": [
+    {"id": "e1", "source": "start", "target": "router", "data": {}}
+  ]
+}`
+	_, err := pathwalk.ParsePathwayBytes([]byte(raw))
+	if err == nil {
+		t.Fatal("expected error for route target referencing unknown node, got nil")
+	}
+	if !strings.Contains(err.Error(), "missing") {
+		t.Errorf("expected error to mention 'missing', got: %v", err)
+	}
+}
+
+// TestParsePathwayUnknownRouteOperator verifies that a route condition with an
+// unrecognised operator string is rejected at parse time.
+func TestParsePathwayUnknownRouteOperator(t *testing.T) {
+	raw := `{
+  "nodes": [
+    {"id": "start",  "type": "Default",  "data": {"name": "Start",  "isStart": true, "prompt": "go"}},
+    {"id": "router", "type": "Route",    "data": {"name": "Router",
+      "routes": [{"conditions": [{"field": "x", "operator": "fuzzy_match", "value": "y"}], "targetNodeId": "end"}]
+    }},
+    {"id": "end",    "type": "End Call", "data": {"name": "End", "text": "done"}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "start",  "target": "router", "data": {}},
+    {"id": "e2", "source": "router", "target": "end",    "data": {}}
+  ]
+}`
+	_, err := pathwalk.ParsePathwayBytes([]byte(raw))
+	if err == nil {
+		t.Fatal("expected error for unknown route condition operator, got nil")
+	}
+	if !strings.Contains(err.Error(), "fuzzy_match") {
+		t.Errorf("expected error to mention 'fuzzy_match', got: %v", err)
+	}
+}
+
+// TestParsePathwayToolResponsePathwayUnknownNode verifies that a tool whose
+// responsePathway references a non-existent nodeId is rejected at parse time.
+func TestParsePathwayToolResponsePathwayUnknownNode(t *testing.T) {
+	raw := `{
+  "nodes": [
+    {"id": "start", "type": "Default", "data": {
+      "name": "Start", "isStart": true, "prompt": "go",
+      "tools": [{
+        "name": "my_tool",
+        "description": "does stuff",
+        "type": "webhook",
+        "behavior": "feed_context",
+        "config": {"url": "https://example.com", "method": "POST"},
+        "responsePathways": [
+          {"type": "default", "nodeId": "nowhere"}
+        ]
+      }]
+    }},
+    {"id": "end", "type": "End Call", "data": {"name": "End", "text": "done"}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "start", "target": "end", "data": {}}
+  ]
+}`
+	_, err := pathwalk.ParsePathwayBytes([]byte(raw))
+	if err == nil {
+		t.Fatal("expected error for tool responsePathway referencing unknown node, got nil")
+	}
+	if !strings.Contains(err.Error(), "nowhere") {
+		t.Errorf("expected error to mention 'nowhere', got: %v", err)
+	}
+}
+
+// TestParsePathwayToolExtractVarsMalformed verifies that a malformed extractVars
+// tuple inside a node-level tool is rejected at parse time.
+func TestParsePathwayToolExtractVarsMalformed(t *testing.T) {
+	// Tuple with only 2 elements — too short.
+	raw := `{
+  "nodes": [
+    {"id": "start", "type": "Default", "data": {
+      "name": "Start", "isStart": true, "prompt": "go",
+      "tools": [{
+        "name": "my_tool",
+        "description": "does stuff",
+        "type": "webhook",
+        "behavior": "feed_context",
+        "config": {"url": "https://example.com", "method": "POST"},
+        "extractVars": [["only_two", "string"]]
+      }]
+    }},
+    {"id": "end", "type": "End Call", "data": {"name": "End", "text": "done"}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "start", "target": "end", "data": {}}
+  ]
+}`
+	_, err := pathwalk.ParsePathwayBytes([]byte(raw))
+	if err == nil {
+		t.Fatal("expected error for malformed tool extractVars tuple, got nil")
 	}
 }

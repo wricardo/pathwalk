@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -531,6 +532,8 @@ func evaluateResponsePathways(pathways []ToolResponsePathway, statusCode int, _ 
 }
 
 // matchCondition evaluates a single operator/value condition against an actual value.
+// For ordering operators (>, <, >=, <=) both values are parsed as integers; if
+// either fails to parse the comparison falls back to lexicographic order.
 func matchCondition(actual, operator, expected string) bool {
 	switch operator {
 	case "==", "is":
@@ -542,14 +545,43 @@ func matchCondition(actual, operator, expected string) bool {
 	case "!contains":
 		return !strings.Contains(actual, expected)
 	case ">":
+		a, b, ok := parseIntPair(actual, expected)
+		if ok {
+			return a > b
+		}
 		return actual > expected
 	case "<":
+		a, b, ok := parseIntPair(actual, expected)
+		if ok {
+			return a < b
+		}
 		return actual < expected
 	case ">=":
+		a, b, ok := parseIntPair(actual, expected)
+		if ok {
+			return a >= b
+		}
 		return actual >= expected
 	case "<=":
+		a, b, ok := parseIntPair(actual, expected)
+		if ok {
+			return a <= b
+		}
 		return actual <= expected
 	default:
 		return false
 	}
+}
+
+// parseIntPair parses two strings as int64. Returns false if either fails.
+func parseIntPair(a, b string) (int64, int64, bool) {
+	ia, err := strconv.ParseInt(a, 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	ib, err := strconv.ParseInt(b, 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	return ia, ib, true
 }

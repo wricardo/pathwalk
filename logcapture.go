@@ -49,11 +49,11 @@ func (lc *logCapture) Handle(ctx context.Context, r slog.Record) error {
 }
 
 func (lc *logCapture) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &logCapture{inner: lc.inner.WithAttrs(attrs), entries: lc.entries}
+	return &logCapture{inner: lc.inner.WithAttrs(attrs)}
 }
 
 func (lc *logCapture) WithGroup(name string) slog.Handler {
-	return &logCapture{inner: lc.inner.WithGroup(name), entries: lc.entries}
+	return &logCapture{inner: lc.inner.WithGroup(name)}
 }
 
 func (lc *logCapture) flush() []LogEntry {

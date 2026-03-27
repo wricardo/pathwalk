@@ -195,51 +195,57 @@ func TestParseToolResponsePathway(t *testing.T) {
 // node-level tools from pathway JSON, including all new fields.
 func TestParsePathwayWithNodeTools(t *testing.T) {
 	raw := `{
-		"nodes": [{
-			"id": "n1",
-			"type": "Default",
-			"data": {
-				"name": "Start",
-				"isStart": true,
-				"prompt": "Hello",
-				"tools": [
-					{
-						"name": "save_data",
-						"description": "Save data to backend",
-						"type": "webhook",
-						"behavior": "feed_context",
-						"config": {
-							"url": "https://example.com/api",
-							"method": "POST",
-							"headers": {"Authorization": "Bearer token"},
-							"body": "{\"key\":\"{{value}}\"}",
-							"timeout": 15,
-							"retries": 2,
-							"response_data": ["id", "status"]
+		"nodes": [
+			{
+				"id": "n1",
+				"type": "Default",
+				"data": {
+					"name": "Start",
+					"isStart": true,
+					"prompt": "Hello",
+					"tools": [
+						{
+							"name": "save_data",
+							"description": "Save data to backend",
+							"type": "webhook",
+							"behavior": "feed_context",
+							"config": {
+								"url": "https://example.com/api",
+								"method": "POST",
+								"headers": {"Authorization": "Bearer token"},
+								"body": "{\"key\":\"{{value}}\"}",
+								"timeout": 15,
+								"retries": 2,
+								"response_data": ["id", "status"]
+							},
+							"speech": "One moment please",
+							"extractVars": [["result_id", "string", "The result ID", true]],
+							"responsePathways": [
+								{"type": "BlandStatusCode", "operator": "==", "value": "404", "nodeId": "error_node", "name": "Not Found"},
+								{"type": "default", "nodeId": "next_node"}
+							]
 						},
-						"speech": "One moment please",
-						"extractVars": [["result_id", "string", "The result ID", true]],
-						"responsePathways": [
-							{"type": "BlandStatusCode", "operator": "==", "value": "404", "nodeId": "error_node", "name": "Not Found"},
-							{"type": "default", "nodeId": "next_node"}
-						]
-					},
-					{
-						"name": "empty_tool",
-						"description": "No config",
-						"type": "webhook",
-						"behavior": "feed_context",
-						"config": {
-							"url": "https://example.com",
-							"body": ""
-						},
-						"extractVars": [],
-						"responsePathways": []
-					}
-				]
-			}
-		}],
-		"edges": []
+						{
+							"name": "empty_tool",
+							"description": "No config",
+							"type": "webhook",
+							"behavior": "feed_context",
+							"config": {
+								"url": "https://example.com",
+								"body": ""
+							},
+							"extractVars": [],
+							"responsePathways": []
+						}
+					]
+				}
+			},
+			{"id": "error_node", "type": "End Call", "data": {"name": "Error", "text": "error"}},
+			{"id": "next_node",  "type": "End Call", "data": {"name": "Next",  "text": "next"}}
+		],
+		"edges": [
+			{"id": "e1", "source": "n1", "target": "next_node", "data": {}}
+		]
 	}`
 
 	pp, err := ParsePathwayBytes([]byte(raw))

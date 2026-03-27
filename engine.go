@@ -2,6 +2,7 @@ package pathwalk
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 )
@@ -64,7 +65,14 @@ func WithLogger(log *slog.Logger) EngineOption {
 }
 
 // NewEngine creates an Engine for the given pathway and LLM client.
+// Panics if pathway or llm is nil.
 func NewEngine(pathway *Pathway, llm LLMClient, opts ...EngineOption) *Engine {
+	if pathway == nil {
+		panic("pathwalk: NewEngine called with nil pathway")
+	}
+	if llm == nil {
+		panic("pathwalk: NewEngine called with nil llm")
+	}
 	e := &Engine{
 		pathway:         pathway,
 		llm:             llm,
@@ -299,7 +307,7 @@ func (e *Engine) Step(ctx context.Context, state *State, nodeID string) (*StepRe
 // taken, variables extracted so far) and the error describes what went wrong.
 func (e *Engine) Run(ctx context.Context, task string) (*RunResult, error) {
 	if e.pathway.StartNode == nil {
-		return &RunResult{Reason: "missing_node"}, nil
+		return &RunResult{Reason: "missing_node"}, fmt.Errorf("pathway has no start node")
 	}
 
 	state := newState(task)
@@ -329,7 +337,7 @@ func (e *Engine) Run(ctx context.Context, task string) (*RunResult, error) {
 			// "error" and "missing_node" are unexpected mid-run failures;
 			// surface them as Go errors to preserve the Run() contract.
 			if result.Reason == "error" || result.Reason == "missing_node" {
-				return rr, fmt.Errorf("%s", result.Error)
+				return rr, errors.New(result.Error)
 			}
 			return rr, nil
 		}

@@ -285,7 +285,7 @@ func ParsePathwayBytes(data []byte) (*Pathway, error) {
 				return nil, fmt.Errorf("node %q extractVars[%d]: %w", rn.Data.Name, i, err)
 			}
 			if vd == nil {
-				continue // malformed tuple, skip
+				return nil, fmt.Errorf("node %q extractVars[%d]: malformed tuple (must have at least 3 elements: name, type, description)", rn.Data.Name, i)
 			}
 			n.ExtractVars = append(n.ExtractVars, *vd)
 		}
@@ -321,11 +321,15 @@ func ParsePathwayBytes(data []byte) (*Pathway, error) {
 			}
 
 			// Parse extractVars tuples (same format as node-level extractVars)
-			for _, raw := range rt.ExtractVars {
-				vd, _ := parseExtractVarTuple(raw)
-				if vd != nil {
-					nt.ExtractVars = append(nt.ExtractVars, *vd)
+			for i, raw := range rt.ExtractVars {
+				vd, err := parseExtractVarTuple(raw)
+				if err != nil {
+					return nil, fmt.Errorf("node %q tool %q extractVars[%d]: %w", rn.Data.Name, rt.Name, i, err)
 				}
+				if vd == nil {
+					return nil, fmt.Errorf("node %q tool %q extractVars[%d]: malformed tuple (must have at least 3 elements: name, type, description)", rn.Data.Name, rt.Name, i)
+				}
+				nt.ExtractVars = append(nt.ExtractVars, *vd)
 			}
 
 			for _, raw := range rt.ResponsePathways {
@@ -354,6 +358,12 @@ func ParsePathwayBytes(data []byte) (*Pathway, error) {
 	}
 
 	for _, re := range raw.Edges {
+		if _, ok := pp.NodeByID[re.Source]; !ok {
+			return nil, fmt.Errorf("edge %q references unknown source node %q", re.ID, re.Source)
+		}
+		if _, ok := pp.NodeByID[re.Target]; !ok {
+			return nil, fmt.Errorf("edge %q references unknown target node %q", re.ID, re.Target)
+		}
 		e := &Edge{
 			ID:     re.ID,
 			Source: re.Source,
@@ -363,6 +373,36 @@ func ParsePathwayBytes(data []byte) (*Pathway, error) {
 		}
 		pp.Edges = append(pp.Edges, e)
 		pp.EdgesFrom[e.Source] = append(pp.EdgesFrom[e.Source], e)
+	}
+
+	// Referential integrity: routes, fallbacks, and tool response pathways
+	for _, n := range pp.Nodes {
+		if n.FallbackNodeID != "" {
+			if _, ok := pp.NodeByID[n.FallbackNodeID]; !ok {
+				return nil, fmt.Errorf("node %q fallbackNodeId references unknown node %q", n.ID, n.FallbackNodeID)
+			}
+		}
+		for _, rule := range n.Routes {
+			if rule.TargetID != "" {
+				if _, ok := pp.NodeByID[rule.TargetID]; !ok {
+					return nil, fmt.Errorf("node %q route target references unknown node %q", n.ID, rule.TargetID)
+				}
+			}
+			for _, cond := range rule.Conditions {
+				if !isKnownOperator(cond.Operator) {
+					return nil, fmt.Errorf("node %q route condition has unknown operator %q", n.ID, cond.Operator)
+				}
+			}
+		}
+		for _, tool := range n.Tools {
+			for _, rp := range tool.ResponsePathways {
+				if rp.NodeID != "" {
+					if _, ok := pp.NodeByID[rp.NodeID]; !ok {
+						return nil, fmt.Errorf("node %q tool %q responsePathway references unknown node %q", n.ID, tool.Name, rp.NodeID)
+					}
+				}
+			}
+		}
 	}
 
 	if pp.StartNode == nil {

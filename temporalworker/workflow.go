@@ -82,6 +82,10 @@ func PathwayWorkflow(ctx workflow.Context, input PathwayInput) (*pathwalk.RunRes
 		maxSteps = pathway.MaxTurns
 	}
 
+	stepCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout: 10 * time.Minute,
+	})
+
 	// Execute steps in a loop.
 	for step := 0; step < maxSteps; step++ {
 		if snapshot.CurrentNodeID == "" {
@@ -105,18 +109,14 @@ func PathwayWorkflow(ctx workflow.Context, input PathwayInput) (*pathwalk.RunRes
 			Verbose:       input.Verbose,
 		}
 
-		actOpts := workflow.ActivityOptions{
-			StartToCloseTimeout: 10 * time.Minute,
-		}
-		ctx = workflow.WithActivityOptions(ctx, actOpts)
-
 		var result *StepActivityResult
-		if err := workflow.ExecuteActivity(ctx, (*PathwayActivities).ExecuteStep, stepInput).Get(ctx, &result); err != nil {
+		if err := workflow.ExecuteActivity(stepCtx, (*PathwayActivities).ExecuteStep, stepInput).Get(stepCtx, &result); err != nil {
 			return &pathwalk.RunResult{
-				Output:    snapshot.Output,
-				Variables: state.Variables,
-				Steps:     state.Steps,
-				Reason:    "error",
+				Output:     snapshot.Output,
+				Variables:  state.Variables,
+				Steps:      state.Steps,
+				Reason:     "error",
+				FailedNode: snapshot.CurrentNodeID,
 			}, fmt.Errorf("executing step at node %q: %w", snapshot.CurrentNodeID, err)
 		}
 
@@ -131,10 +131,11 @@ func PathwayWorkflow(ctx workflow.Context, input PathwayInput) (*pathwalk.RunRes
 		// Check if the run is done.
 		if stepResult.Done {
 			result := &pathwalk.RunResult{
-				Output:    stepResult.Output,
-				Variables: state.Variables,
-				Steps:     state.Steps,
-				Reason:    stepResult.Reason,
+				Output:     stepResult.Output,
+				Variables:  state.Variables,
+				Steps:      state.Steps,
+				Reason:     stepResult.Reason,
+				FailedNode: stepResult.FailedNode,
 			}
 
 			// Call completion callback if configured.
@@ -143,13 +144,14 @@ func PathwayWorkflow(ctx workflow.Context, input PathwayInput) (*pathwalk.RunRes
 					Data:   input.CompletionData,
 					Result: result,
 				}
-				cbOpts := workflow.ActivityOptions{
+				cbCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 					TaskQueue:           input.CompletionTaskQueue,
 					StartToCloseTimeout: 60 * time.Second,
 					RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
+				})
+				if err := workflow.ExecuteActivity(cbCtx, input.CompletionActivityName, cbInput).Get(cbCtx, nil); err != nil {
+					workflow.GetLogger(ctx).Warn("completion callback failed", "error", err)
 				}
-				ctx = workflow.WithActivityOptions(ctx, cbOpts)
-				_ = workflow.ExecuteActivity(ctx, input.CompletionActivityName, cbInput).Get(ctx, nil)
 			}
 
 			return result, nil
@@ -173,13 +175,14 @@ func PathwayWorkflow(ctx workflow.Context, input PathwayInput) (*pathwalk.RunRes
 			Data:   input.CompletionData,
 			Result: result,
 		}
-		cbOpts := workflow.ActivityOptions{
+		cbCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 			TaskQueue:           input.CompletionTaskQueue,
 			StartToCloseTimeout: 60 * time.Second,
 			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
+		})
+		if err := workflow.ExecuteActivity(cbCtx, input.CompletionActivityName, cbInput).Get(cbCtx, nil); err != nil {
+			workflow.GetLogger(ctx).Warn("completion callback failed", "error", err)
 		}
-		ctx = workflow.WithActivityOptions(ctx, cbOpts)
-		_ = workflow.ExecuteActivity(ctx, input.CompletionActivityName, cbInput).Get(ctx, nil)
 	}
 
 	return result, nil

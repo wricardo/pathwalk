@@ -8,11 +8,12 @@ import (
 
 // pathwayJSON mirrors the top-level structure of a pathway JSON file.
 type pathwayJSON struct {
-	Nodes            []nodeJSON `json:"nodes"`
-	Edges            []edgeJSON `json:"edges"`
-	GraphQLEndpoint  string     `json:"graphqlEndpoint"`
-	MaxTurns         int        `json:"maxTurns"`
-	MaxVisitsPerNode int        `json:"maxVisitsPerNode"`
+	Nodes             []nodeJSON        `json:"nodes"`
+	Edges             []edgeJSON        `json:"edges"`
+	GraphQLEndpoint   string            `json:"graphqlEndpoint"`
+	GraphQLEndpoints  map[string]string `json:"graphqlEndpoints"`
+	MaxTurns          int               `json:"maxTurns"`
+	MaxVisitsPerNode  int               `json:"maxVisitsPerNode"`
 }
 
 type nodeJSON struct {
@@ -207,13 +208,14 @@ func parseNodeType(raw string) NodeType {
 
 // Pathway holds parsed nodes and edges with lookup indexes.
 type Pathway struct {
-	Nodes           []*Node
-	Edges           []*Edge
-	NodeByID        map[string]*Node
-	EdgesFrom       map[string][]*Edge // source nodeID → outgoing edges
-	StartNode       *Node
-	GlobalNodes     []*Node // nodes with IsGlobal == true and a non-empty GlobalLabel
-	GraphQLEndpoint string  // optional default GraphQL endpoint
+	Nodes            []*Node
+	Edges            []*Edge
+	NodeByID         map[string]*Node
+	EdgesFrom        map[string][]*Edge // source nodeID → outgoing edges
+	StartNode        *Node
+	GlobalNodes      []*Node // nodes with IsGlobal == true and a non-empty GlobalLabel
+	GraphQLEndpoint  string            // optional single GraphQL endpoint (unnamed tools)
+	GraphQLEndpoints map[string]string // named endpoints → tools get _<name> suffix
 
 	// MaxTurns caps the total number of node-to-node transitions in a run.
 	// 0 means use the engine's WithMaxSteps value (default 50).
@@ -243,6 +245,7 @@ func ParsePathwayBytes(data []byte) (*Pathway, error) {
 		NodeByID:         make(map[string]*Node),
 		EdgesFrom:        make(map[string][]*Edge),
 		GraphQLEndpoint:  raw.GraphQLEndpoint,
+		GraphQLEndpoints: raw.GraphQLEndpoints,
 		MaxTurns:         raw.MaxTurns,
 		MaxVisitsPerNode: raw.MaxVisitsPerNode,
 	}

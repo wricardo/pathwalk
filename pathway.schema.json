@@ -23,6 +23,14 @@
       "description": "Default GraphQL endpoint URL. Enables graphql_query and graphql_mutation tools.",
       "format": "uri"
     },
+    "graphqlEndpoints": {
+      "type": "object",
+      "description": "Named GraphQL endpoints. Each key becomes a tool-name suffix: graphql_query_<name>, graphql_mutation_<name>, etc. Allows a single pathway to call multiple GraphQL APIs.",
+      "additionalProperties": {
+        "type": "string",
+        "format": "uri"
+      }
+    },
     "maxTurns": {
       "type": "integer",
       "description": "Maximum number of node-to-node transitions. 0 means use the engine default (50).",
@@ -32,6 +40,32 @@
       "type": "integer",
       "description": "Default per-node visit cap applied to all nodes. 0 means no limit.",
       "minimum": 0
+    },
+    "schedule": {
+      "type": "object",
+      "description": "Optional cron schedule that declares how this pathway should be run on a recurring cadence.",
+      "additionalProperties": false,
+      "properties": {
+        "cron": {
+          "type": "string",
+          "description": "Standard cron expression (e.g. '0 8 * * 1-5').",
+          "minLength": 1
+        },
+        "task": {
+          "type": "string",
+          "description": "Task description passed to the agent when the schedule fires.",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable note shown in schedule listings."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "IANA timezone name (e.g. 'America/New_York'). Defaults to UTC."
+        }
+      },
+      "required": ["cron", "task"]
     }
   },
   "definitions": {

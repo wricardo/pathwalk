@@ -18,15 +18,29 @@ import (
 
 // GraphQLTool executes GraphQL queries and mutations against a configured endpoint.
 // The endpoint is set once at construction; per-call overrides are not supported.
+//
+// When Name is non-empty, all tool names get a "_<Name>" suffix so multiple
+// endpoints can coexist in the same engine:
+//
+//	graphql_query_sheets, graphql_mutation_sheets, graphql_queries_sheets …
 type GraphQLTool struct {
 	Endpoint string
 	Headers  map[string]string
+	Name     string // optional suffix for multi-endpoint pathways
+}
+
+// toolName returns the full tool name, appending "_<Name>" when set.
+func (t *GraphQLTool) toolName(base string) string {
+	if t.Name != "" {
+		return base + "_" + t.Name
+	}
+	return base
 }
 
 // queryTool returns the engine Tool for executing GraphQL queries.
 func (t *GraphQLTool) queryTool() pathwalk.Tool {
 	return pathwalk.Tool{
-		Name:        "graphql_query",
+		Name:        t.toolName("graphql_query"),
 		Description: "Execute a GraphQL query against the configured endpoint. Returns the JSON response.",
 		Parameters: map[string]any{
 			"type": "object",
@@ -49,7 +63,7 @@ func (t *GraphQLTool) queryTool() pathwalk.Tool {
 // mutationTool returns the engine Tool for executing GraphQL mutations.
 func (t *GraphQLTool) mutationTool() pathwalk.Tool {
 	return pathwalk.Tool{
-		Name:        "graphql_mutation",
+		Name:        t.toolName("graphql_mutation"),
 		Description: "Execute a GraphQL mutation against the configured endpoint. Returns the JSON response.",
 		Parameters: map[string]any{
 			"type": "object",

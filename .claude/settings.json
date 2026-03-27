@@ -1,0 +1,13 @@
+{
+  "extraKnownMarketplaces": {
+    "pathwalk": {
+      "source": {
+        "source": "github",
+        "repo": "wricardo/pathwalk"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "pathwalk-engineer@pathwalk": true
+  }
+}

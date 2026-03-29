@@ -143,7 +143,12 @@ func parseExtractVarTuple(raw json.RawMessage) (*VariableDef, error) {
 			return nil, fmt.Errorf("invalid required flag: %w", err)
 		}
 	}
-	return &VariableDef{Name: name, Type: typ, Description: desc, Required: required}, nil
+	// Optional 5th element: jq expression for deterministic extraction
+	var jqExpr string
+	if len(tuple) >= 5 {
+		_ = json.Unmarshal(tuple[4], &jqExpr)
+	}
+	return &VariableDef{Name: name, Type: typ, Description: desc, Required: required, JQ: jqExpr}, nil
 }
 
 // parseToolResponsePathway parses a single responsePathway entry.

@@ -207,5 +207,7 @@ func (c *OpenAIClient) Complete(ctx context.Context, req CompletionRequest) (*Co
 		}
 	}
 
-	return nil, fmt.Errorf("exceeded maximum tool call rounds (%d)", maxToolRounds)
+	return &CompletionResponse{
+		ToolCalls: allToolCalls,
+	}, fmt.Errorf("exceeded maximum tool call rounds (%d)", maxToolRounds)
 }

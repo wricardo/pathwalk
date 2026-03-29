@@ -67,20 +67,24 @@ Both `source` and `target` must reference existing node IDs — the parser valid
 
 ## extractVars
 
-Tells the engine to make a second LLM call after `execute` to extract structured data into state variables.
+Tells the engine to extract structured data into state variables. By default, a second LLM call is made after `execute`. When a `jq` expression is provided (5th element), extraction is deterministic — no LLM call needed.
 
 ```json
 "extractVars": [
   ["variable_name", "string",  "Description for the LLM", true],
   ["count",         "integer", "How many items",           false],
-  ["confirmed",     "boolean", "User confirmed?",          false]
+  ["confirmed",     "boolean", "User confirmed?",          false],
+  ["order_id",      "string",  "The created order ID",     true, ".data.createOrder.id"]
 ]
 ```
 
-Tuple format: `[name, type, description, required]`
+Tuple format: `[name, type, description, required, jq]`
 - `type` must be `"string"`, `"integer"`, or `"boolean"`
 - `required` is optional (defaults to false)
+- `jq` is optional — a jq expression to extract the value from the response (no LLM call)
 - Tuples with fewer than 3 elements cause a parse error
+
+When `jq` is set, the engine applies it via gojq on the response text/JSON. If jq extraction fails, it falls back to LLM extraction. Variables without jq use LLM extraction as before.
 
 Extracted variables are merged into `state.Variables` and available in all subsequent nodes as `{{variable_name}}` in templates.
 

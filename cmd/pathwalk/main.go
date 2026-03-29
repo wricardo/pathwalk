@@ -18,6 +18,7 @@ func main() {
 		Commands: []*cli.Command{
 			runCmd(),
 			validateCmd(),
+			agentCmd(),
 		},
 	}
 
@@ -162,6 +163,75 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+func agentCmd() *cli.Command {
+	return &cli.Command{
+		Name:  "agent",
+		Usage: "Run a free-form GraphQL agent (no pathway required)",
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:    "endpoint",
+				Aliases: []string{"e"},
+				Usage:   "GraphQL API endpoint",
+				EnvVars: []string{"GRAPHQL_ENDPOINT"},
+			},
+			&cli.StringSliceFlag{
+				Name:  "graphql-header",
+				Usage: "HTTP headers for GraphQL requests, format: Key=Value (repeatable)",
+			},
+			&cli.StringFlag{
+				Name:  "model",
+				Usage: "LLM model name",
+				Value: "qwen/qwen3.5-35b-a3b",
+			},
+			&cli.StringFlag{
+				Name:    "api-key",
+				Usage:   "API key for the LLM provider",
+				EnvVars: []string{"OPENAI_API_KEY"},
+			},
+			&cli.StringFlag{
+				Name:    "base-url",
+				Usage:   "Base URL for an OpenAI-compatible LLM API",
+				EnvVars: []string{"OPENAI_BASE_URL"},
+			},
+			&cli.StringFlag{
+				Name:    "task",
+				Aliases: []string{"t"},
+				Usage:   "One-shot task (skips interactive prompt, exits when done)",
+			},
+		},
+		Action: func(c *cli.Context) error {
+			return runAgentCmd(c)
+		},
+	}
+}
+
+func runAgentCmd(c *cli.Context) error {
+	llm := pathwalk.NewOpenAIClient(
+		c.String("api-key"),
+		c.String("base-url"),
+		c.String("model"),
+	)
+
+	endpoint := c.String("endpoint")
+	headers := parseHeaders(c.StringSlice("graphql-header"))
+	gt := &tools.GraphQLTool{Endpoint: endpoint, Headers: headers}
+
+	// Build schema context for the system prompt; best-effort (no fatal on failure).
+	var schemaCtx string
+	if endpoint != "" {
+		var err error
+		schemaCtx, err = gt.BuildSchemaContext(c.Context)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not fetch schema: %v\n", err)
+		}
+	}
+
+	systemPrompt := pathwalk.BuildAgentSystemPrompt(schemaCtx)
+	agent := pathwalk.NewAgentWithModel(llm, gt.AsTools(), systemPrompt, c.String("model"))
+
+	return agent.RunInteractive(c.Context, os.Stdin, os.Stdout, c.String("task"))
 }
 
 func validateCmd() *cli.Command {

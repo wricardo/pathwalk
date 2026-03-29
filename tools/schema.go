@@ -9,12 +9,15 @@ import (
 	pathwalk "github.com/wricardo/pathwalk"
 )
 
-// AsTools returns all six GraphQL tools: graphql_query, graphql_mutation,
-// graphql_queries, graphql_mutations, graphql_types, and graphql_type.
+// AsTools returns all GraphQL tools: graphql_query, graphql_mutation,
+// graphql_batch, graphql_explore, graphql_queries, graphql_mutations,
+// graphql_types, and graphql_type.
 func (t *GraphQLTool) AsTools() []pathwalk.Tool {
 	return []pathwalk.Tool{
 		t.queryTool(),
 		t.mutationTool(),
+		t.batchTool(),
+		t.exploreTool(),
 		t.queriesListTool(),
 		t.mutationsListTool(),
 		t.typesListTool(),
@@ -174,6 +177,38 @@ func (t *GraphQLTool) typeDescribeTool() pathwalk.Tool {
 			return formatTypeDefDeep(raw), nil
 		},
 	}
+}
+
+// BuildSchemaContext runs introspection and returns a compact schema summary
+// suitable for injecting into an agent system prompt. It lists all queries
+// and mutations with their argument types and return types.
+func (t *GraphQLTool) BuildSchemaContext(ctx context.Context) (string, error) {
+	const q = `{ __schema {
+		queryType    { fields { name description args { name type { ...TR } } type { ...TR } } }
+		mutationType { fields { name description args { name type { ...TR } } type { ...TR } } }
+	} }
+	fragment TR on __Type { kind name ofType { kind name ofType { kind name ofType { kind name } } } }`
+
+	raw, err := t.runIntrospection(ctx, q)
+	if err != nil {
+		return "", err
+	}
+
+	queries := formatFieldList(extractFields(raw, "queryType"), "", false)
+	mutations := formatFieldList(extractFields(raw, "mutationType"), "", false)
+
+	var b strings.Builder
+	if queries != "" {
+		b.WriteString("## Queries\n")
+		b.WriteString(queries)
+		b.WriteString("\n")
+	}
+	if mutations != "" {
+		b.WriteString("\n## Mutations\n")
+		b.WriteString(mutations)
+		b.WriteString("\n")
+	}
+	return strings.TrimSpace(b.String()), nil
 }
 
 // runIntrospection executes an introspection query and returns the parsed data map.

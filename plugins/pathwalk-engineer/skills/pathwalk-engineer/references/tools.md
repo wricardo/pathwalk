@@ -61,22 +61,105 @@ gql := &tools.GraphQLTool{
 }
 
 engine := pathwalk.NewEngine(pathway, llm,
-    pathwalk.WithTools(gql.Tools()...),
+    pathwalk.WithTools(gql.AsTools()...),
 )
 ```
 
-This registers six tools with the LLM:
+This registers eight tools with the LLM:
 
 | Tool name | Purpose |
 |-----------|---------|
-| `graphql_query` | Execute a GraphQL query |
-| `graphql_mutation` | Execute a GraphQL mutation |
+| `graphql_query` | Execute a GraphQL query (optional `jq` param for response filtering) |
+| `graphql_mutation` | Execute a GraphQL mutation (optional `jq` param) |
+| `graphql_batch` | Execute multiple operations in one request (NDJSON) |
+| `graphql_explore` | Batch schema exploration (queries + mutations + types in one call) |
 | `graphql_queries` | List available queries in the schema |
 | `graphql_mutations` | List available mutations in the schema |
 | `graphql_types` | List all types |
 | `graphql_type` | Describe a specific type |
 
 When `Name` is set (e.g. `Name: "orders"`), all tool names get a suffix: `graphql_query_orders`, etc. Use this when a pathway needs to talk to multiple GraphQL endpoints.
+
+### Server-Side jq Filtering
+
+`graphql_query`, `graphql_mutation`, and `graphql_batch` accept an optional `jq` parameter. When the server supports NDJSON with jq filtering (like graphql-api's `internal/transport/NDJSON`), the filter is applied server-side before the response is returned. Otherwise, pathwalk applies it client-side via gojq.
+
+```
+LLM calls: graphql_query(query: "{ users { id name status } }", jq: ".data.users[].name")
+Result:    ["Alice", "Bob"]   ← instead of full {"data":{"users":[...]}} envelope
+```
+
+This reduces tokens in the LLM conversation by returning only the relevant data.
+
+### graphql_batch
+
+Sends multiple operations as NDJSON to the server in a single HTTP request:
+
+```
+LLM calls: graphql_batch(operations: [
+  {query: "{ users { id } }", jq: ".data.users | length"},
+  {query: "{ orders { id } }", jq: ".data.orders | length"}
+])
+Result: [42, 15]
+```
+
+Falls back to sequential requests if the server doesn't support NDJSON.
+
+### graphql_explore
+
+Batches schema introspection into a single request:
+
+```
+LLM calls: graphql_explore(
+  include_queries: true,
+  include_mutations: true,
+  types: ["User", "CreateUserInput"]
+)
+Result: {queries: [...], mutations: [...], types: [...]}
+```
+
+## jq Tool
+
+Pure Go jq implementation using `github.com/itchyny/gojq`. No external binary required.
+
+```go
+engine := pathwalk.NewEngine(pathway, llm,
+    pathwalk.WithTools(tools.JqTool{}.AsTools()...),
+)
+```
+
+The LLM can call `jq(data: {...}, filter: ".users[].name")` to transform JSON data.
+
+Also available as a Go function:
+
+```go
+result, err := pathwalk.RunJQ(".users[].name", data)
+```
+
+## Built-in Tools Bundle
+
+```go
+// All general-purpose tools: jq, grep, http_request
+engine := pathwalk.NewEngine(pathway, llm,
+    pathwalk.WithTools(tools.BuiltinTools()...),
+)
+```
+
+## extractVars with jq (Deterministic Extraction)
+
+`VariableDef` supports an optional `JQ` field. When set, the engine uses gojq instead of calling the LLM to extract the variable — saving a full LLM round trip.
+
+```go
+// In Go:
+VariableDef{Name: "orderId", Type: "string", Description: "The order ID", JQ: ".data.createOrder.id"}
+```
+
+```json
+// In pathway JSON (5th tuple element):
+["orderId", "string", "The order ID", true, ".data.createOrder.id"]
+```
+
+When the LLM or webhook returns a JSON response, the jq expression extracts the value deterministically. Variables without a JQ expression fall back to LLM-based extraction as before.
 
 ## Node-Level Tools (Webhook)
 

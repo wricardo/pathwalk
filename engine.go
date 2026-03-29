@@ -174,7 +174,21 @@ func (e *Engine) Step(ctx context.Context, state *State, nodeID string) (*StepRe
 	// Execute the node
 	out, err := executeNode(ctx, currentNode, state, e.llm, e.tools, stepLog)
 	if err != nil {
+		// If executeNode returned partial output (e.g. tool calls accumulated
+		// before hitting a limit), record them in a failed step so the full
+		// execution trace is visible to callers.
+		var partialToolCalls []ToolCall
+		if out != nil {
+			partialToolCalls = out.ToolCalls
+		}
+		failedStep := Step{
+			NodeID:    currentNode.ID,
+			NodeName:  currentNode.Name,
+			ToolCalls: partialToolCalls,
+		}
+		state.Steps = append(state.Steps, failedStep)
 		return &StepResult{
+			Step:       failedStep,
 			Done:       true,
 			Reason:     "error",
 			Error:      fmt.Sprintf("executing node %q: %v", currentNode.Name, err),

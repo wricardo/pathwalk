@@ -1,4 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import Chat from './Chat'
+import Editor from './Editor'
+import SettingsModal from './SettingsModal'
 
 // ── constants ──────────────────────────────────────────────────────────────────
 
@@ -476,6 +479,12 @@ export default function App() {
   const [active, setActive] = useState(null)
   const [pathway, setPathway] = useState(null)
   const [error, setError] = useState(null)
+  const [tab, setTab] = useState('view')
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settings, setSettings] = useState(() => {
+    const saved = localStorage.getItem('pathwalk_settings')
+    return saved ? JSON.parse(saved) : { apiKey: '', model: 'qwen/qwen3.5-35b-a3b', baseUrl: '' }
+  })
 
   useEffect(() => {
     fetch('/api/pathways')
@@ -486,22 +495,111 @@ export default function App() {
 
   const selectPathway = useCallback((name) => {
     setActive(name)
+    setTab('view')
     setError(null)
     fetch(`/api/pathway?file=${encodeURIComponent(name)}`)
       .then(r => r.json())
-      .then(setPathway)
+      .then(pathwayData => {
+        setPathway({
+          fileName: name,
+          content: JSON.stringify(pathwayData),
+          data: pathwayData, // Keep the parsed data for canvas
+        })
+      })
       .catch(() => setError(`Failed to load ${name}`))
   }, [])
+
+  const handleSaveSettings = (newSettings) => {
+    setSettings(newSettings)
+    localStorage.setItem('pathwalk_settings', JSON.stringify(newSettings))
+    setSettingsOpen(false)
+  }
+
+  const TabButton = ({ id, label, emoji }) => {
+    const isActive = tab === id
+    return (
+      <button
+        onClick={() => setTab(id)}
+        style={{
+          padding: '8px 16px', border: 'none',
+          background: isActive ? '#1e293b' : 'transparent',
+          color: isActive ? '#93c5fd' : '#64748b',
+          cursor: 'pointer', fontSize: 13, fontWeight: 600,
+          borderBottom: isActive ? '2px solid #3b82f6' : '2px solid transparent',
+          marginRight: 8,
+        }}
+      >
+        {emoji} {label}
+      </button>
+    )
+  }
 
   return (
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
       <Sidebar pathways={pathways} active={active} onSelect={selectPathway} />
-      <main style={{ flex: 1, overflow: 'hidden', display: 'flex', position: 'relative' }}>
-        {error
-          ? <div style={{ padding: 24, color: '#ef4444', fontSize: 14 }}>{error}</div>
-          : <PathwayCanvas pathway={pathway} />
-        }
+      <main style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+        {active && (
+          <>
+            {/* Tab bar */}
+            <div style={{
+              display: 'flex', alignItems: 'center',
+              background: '#0f172a', borderBottom: '1px solid #1e293b',
+              padding: '0 16px', height: 48,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', flex: 1 }}>
+                <TabButton id="view" label="View" emoji="▶" />
+                <TabButton id="chat" label="Chat" emoji="💬" />
+                <TabButton id="edit" label="Edit" emoji="✎" />
+              </div>
+              <button
+                onClick={() => setSettingsOpen(true)}
+                style={{
+                  background: 'none', border: 'none', color: '#64748b',
+                  cursor: 'pointer', fontSize: 18, padding: '4px 8px',
+                }}
+                title="Settings"
+              >
+                ⚙
+              </button>
+            </div>
+
+            {/* Tab content */}
+            {error && (
+              <div style={{ padding: 16, color: '#ef4444', fontSize: 14 }}>
+                {error}
+              </div>
+            )}
+
+            {tab === 'view' && (
+              <PathwayCanvas pathway={pathway?.data} />
+            )}
+
+            {tab === 'chat' && (
+              <Chat pathway={pathway} settings={settings} />
+            )}
+
+            {tab === 'edit' && (
+              <Editor pathway={pathway} />
+            )}
+          </>
+        )}
+
+        {!active && (
+          <div style={{
+            flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            color: '#475569', fontSize: 14,
+          }}>
+            Select a pathway from the sidebar
+          </div>
+        )}
       </main>
+
+      <SettingsModal
+        isOpen={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        settings={settings}
+        onSave={handleSaveSettings}
+      />
     </div>
   )
 }

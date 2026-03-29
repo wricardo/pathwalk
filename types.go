@@ -37,6 +37,12 @@ type VariableDef struct {
 	Type        string // "string", "integer", "boolean"
 	Description string
 	Required    bool
+	// JQ is an optional jq expression for deterministic extraction from
+	// structured (JSON) responses. When set, the engine uses gojq instead
+	// of calling the LLM, saving a round trip. The expression receives the
+	// full response and should return a single value.
+	// Example: ".data.createOrder.id"
+	JQ string
 }
 
 // Edge represents a directed connection between two nodes.

@@ -72,7 +72,13 @@ func executeLLM(ctx context.Context, node *Node, state *State, llm LLMClient, to
 	start := time.Now()
 	resp, err := llm.Complete(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("node %q LLM call: %w", node.Name, err)
+		// Return partial tool calls alongside the error so callers can record
+		// what was executed before the failure (e.g. exceeded max tool rounds).
+		var partial *nodeOutput
+		if resp != nil && len(resp.ToolCalls) > 0 {
+			partial = &nodeOutput{ToolCalls: resp.ToolCalls}
+		}
+		return partial, fmt.Errorf("node %q LLM call: %w", node.Name, err)
 	}
 
 	// If the model didn't use function calling but emitted a <|channel|> directive,
@@ -161,13 +167,54 @@ func buildUserMessage(state *State) string {
 	return b.String()
 }
 
-// extractVars calls the LLM to pull structured variables out of the node output.
+// extractVars pulls structured variables out of the node output.
+// Variables with a JQ expression are extracted deterministically using gojq.
+// Remaining variables are extracted by calling the LLM.
 func extractVars(ctx context.Context, node *Node, text string, llm LLMClient, log *slog.Logger) (map[string]any, error) {
 	ctx = WithCallPurpose(ctx, "extract_vars")
 
+	result := map[string]any{}
+
+	// First pass: extract variables that have JQ expressions (deterministic, no LLM call).
+	var llmVars []VariableDef
+	for _, v := range node.ExtractVars {
+		if v.JQ != "" {
+			extracted, err := RunJQ(v.JQ, text)
+			if err != nil {
+				log.Warn("jq extraction failed, will use LLM", "var", v.Name, "jq", v.JQ, "error", err)
+				llmVars = append(llmVars, v)
+				continue
+			}
+			result[v.Name] = extracted
+		} else {
+			llmVars = append(llmVars, v)
+		}
+	}
+
+	// Second pass: extract remaining variables via LLM.
+	if len(llmVars) > 0 {
+		llmResult, err := extractVarsLLM(ctx, llmVars, text, llm, log)
+		if err != nil {
+			return result, err
+		}
+		for k, v := range llmResult {
+			result[k] = v
+		}
+	}
+
+	if len(result) > 0 {
+		varsJSON, _ := json.Marshal(result)
+		log.Debug("variables extracted", "vars", string(varsJSON))
+	}
+
+	return result, nil
+}
+
+// extractVarsLLM calls the LLM to extract variables that don't have JQ expressions.
+func extractVarsLLM(ctx context.Context, vars []VariableDef, text string, llm LLMClient, log *slog.Logger) (map[string]any, error) {
 	// Build the variable descriptions
 	var varDesc strings.Builder
-	for _, v := range node.ExtractVars {
+	for _, v := range vars {
 		req := ""
 		if v.Required {
 			req = " (required)"
@@ -178,7 +225,7 @@ func extractVars(ctx context.Context, node *Node, text string, llm LLMClient, lo
 	// Build the JSON schema for set_variables
 	properties := map[string]any{}
 	var requiredFields []string
-	for _, v := range node.ExtractVars {
+	for _, v := range vars {
 		jsonType := "string"
 		switch v.Type {
 		case "integer":
@@ -244,11 +291,6 @@ func extractVars(ctx context.Context, node *Node, text string, llm LLMClient, lo
 		}
 	}
 
-	if len(result) > 0 {
-		varsJSON, _ := json.Marshal(result)
-		log.Debug("variables extracted", "vars", string(varsJSON))
-	}
-
 	return result, nil
 }
 
@@ -294,11 +336,20 @@ func executeWebhook(ctx context.Context, node *Node, state *State) (*nodeOutput,
 		respData = string(respBytes)
 	}
 
-	// Extract variables from webhook response if extractVars is set
+	// Extract variables from webhook response if extractVars is set.
+	// Variables with JQ expressions use gojq; others do simple key lookup.
 	vars := map[string]any{}
 	if len(node.ExtractVars) > 0 {
-		if m, ok := respData.(map[string]any); ok {
-			for _, vd := range node.ExtractVars {
+		for _, vd := range node.ExtractVars {
+			if vd.JQ != "" {
+				extracted, err := RunJQ(vd.JQ, respData)
+				if err == nil {
+					vars[vd.Name] = extracted
+					continue
+				}
+				// Fall through to key-based lookup on jq error
+			}
+			if m, ok := respData.(map[string]any); ok {
 				if v, exists := m[vd.Name]; exists {
 					vars[vd.Name] = v
 				}
@@ -403,17 +454,26 @@ func nodeToolToTool(nt NodeTool, state *State, log *slog.Logger) Tool {
 			}
 
 			// Extract variables from the response if configured.
+			// Variables with JQ expressions use gojq; others do simple key lookup.
 			if len(nt.ExtractVars) > 0 {
-				if m, ok := result.(map[string]any); ok {
-					extracted := map[string]any{}
-					for _, vd := range nt.ExtractVars {
+				extracted := map[string]any{}
+				for _, vd := range nt.ExtractVars {
+					if vd.JQ != "" {
+						val, err := RunJQ(vd.JQ, result)
+						if err == nil {
+							extracted[vd.Name] = val
+							continue
+						}
+						// Fall through to key-based lookup on jq error
+					}
+					if m, ok := result.(map[string]any); ok {
 						if v, exists := m[vd.Name]; exists {
 							extracted[vd.Name] = v
 						}
 					}
-					if len(extracted) > 0 {
-						state.SetVars(extracted)
-					}
+				}
+				if len(extracted) > 0 {
+					state.SetVars(extracted)
 				}
 			}
 

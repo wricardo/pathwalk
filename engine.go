@@ -11,14 +11,15 @@ const defaultMaxSteps = 50
 
 // StepResult captures what happened during a single node execution.
 type StepResult struct {
-	Step       Step       // The step record for this execution
-	NextNodeID string     // Empty when Done=true (terminal, dead_end, error, or max_node_visits)
-	Done       bool       // True when the run should terminate
-	Reason     string     // "terminal", "dead_end", "error", "missing_node", "max_node_visits"
-	Output     string     // Text output from the node
-	Error      string     // Error message if Reason=="error" or "max_node_visits"
-	FailedNode string     // Name of the node that caused the stop when Reason is "error" or "max_node_visits"
-	Logs       []LogEntry // Log records emitted during this step
+	Step          Step           // The step record for this execution
+	NextNodeID    string         // Empty when Done=true (terminal, dead_end, error, or max_node_visits)
+	Done          bool           // True when the run should terminate
+	Reason        string         // "terminal", "dead_end", "error", "missing_node", "max_node_visits", "checkpoint"
+	Output        string         // Text output from the node
+	Error         string         // Error message if Reason=="error" or "max_node_visits"
+	FailedNode    string         // Name of the node that caused the stop when Reason is "error" or "max_node_visits"
+	Logs          []LogEntry     // Log records emitted during this step
+	WaitCondition *WaitCondition // Non-nil when the step is waiting for external input (checkpoint node)
 }
 
 // Engine executes a parsed pathway using an LLM and optional tools.
@@ -150,9 +151,114 @@ func (e *Engine) Step(ctx context.Context, state *State, nodeID string) (*StepRe
 		}, nil
 	}
 
+	// Handle agent nodes — always suspend.
+	if currentNode.Type == NodeTypeAgent {
+		task := resolveTemplate(currentNode.AgentTask, state.Variables)
+		wc := &WaitCondition{
+			Mode:   CheckpointModeAgent,
+			NodeID: currentNode.ID,
+			NodeName: currentNode.Name,
+			Prompt: currentNode.Name,
+			AgentTask: &AgentTask{
+				Name:      currentNode.Name,
+				AgentID:   currentNode.AgentID,
+				Task:      task,
+				OutputVar: currentNode.AgentOutputVar,
+			},
+		}
+		sl := Step{
+			NodeID: currentNode.ID,
+			NodeName: currentNode.Name,
+			Output: fmt.Sprintf("[agent] Spawning child agent %q (task: %s)", currentNode.Name, truncate(task, 100)),
+		}
+		state.Steps = append(state.Steps, sl)
+		stepLog.Debug("agent node suspended", "node", currentNode.Name, "agentId", currentNode.AgentID)
+		return &StepResult{
+			Step:          sl,
+			Reason:        "checkpoint",
+			WaitCondition: wc,
+			Logs:          lc.flush(),
+		}, nil
+	}
+
+	// Handle team nodes — always suspend.
+	if currentNode.Type == NodeTypeTeam {
+		var tasks []AgentTask
+		for _, a := range currentNode.TeamAgents {
+			tasks = append(tasks, AgentTask{
+				Name:      a.Name,
+				AgentID:   a.AgentID,
+				Task:      resolveTemplate(a.Task, state.Variables),
+				OutputVar: a.OutputVar,
+			})
+		}
+		wc := &WaitCondition{
+			Mode:         CheckpointModeTeam,
+			NodeID:       currentNode.ID,
+			NodeName:     currentNode.Name,
+			Prompt:       currentNode.Name,
+			TeamTasks:    tasks,
+			TeamStrategy: currentNode.TeamStrategy,
+		}
+		agentNames := make([]string, len(tasks))
+		for i, t := range tasks {
+			agentNames[i] = t.Name
+		}
+		sl := Step{
+			NodeID:   currentNode.ID,
+			NodeName: currentNode.Name,
+			Output:   fmt.Sprintf("[team:%s] Spawning %d agents: %s", currentNode.TeamStrategy, len(tasks), fmt.Sprintf("%v", agentNames)),
+		}
+		state.Steps = append(state.Steps, sl)
+		stepLog.Debug("team node suspended", "node", currentNode.Name, "strategy", currentNode.TeamStrategy, "agents", len(tasks))
+		return &StepResult{
+			Step:          sl,
+			Reason:        "checkpoint",
+			WaitCondition: wc,
+			Logs:          lc.flush(),
+		}, nil
+	}
+
+	// Handle checkpoint nodes that require external input (human modes suspend).
+	if currentNode.Type == NodeTypeCheckpoint {
+		switch currentNode.CheckpointMode {
+		case CheckpointModeHumanInput, CheckpointModeHumanApproval, CheckpointModeWait:
+			wc := &WaitCondition{
+				Mode:         currentNode.CheckpointMode,
+				NodeID:       currentNode.ID,
+				NodeName:     currentNode.Name,
+				Prompt:       currentNode.CheckpointPrompt,
+				VariableName: currentNode.CheckpointVariable,
+				Variables:    currentNode.ExtractVars,
+				WaitDuration: currentNode.WaitDuration,
+			}
+			if currentNode.CheckpointMode == CheckpointModeHumanApproval {
+				wc.Options = currentNode.CheckpointOptions
+				if len(wc.Options) == 0 {
+					wc.Options = []string{"approve", "reject"}
+				}
+			}
+			sl := Step{
+				NodeID:   currentNode.ID,
+				NodeName: currentNode.Name,
+				Output:   fmt.Sprintf("[%s] %s", currentNode.CheckpointMode, currentNode.CheckpointPrompt),
+			}
+			state.Steps = append(state.Steps, sl)
+			stepLog.Debug("checkpoint suspended", "node", currentNode.Name, "mode", currentNode.CheckpointMode)
+			return &StepResult{
+				Step:          sl,
+				Reason:        "checkpoint",
+				WaitCondition: wc,
+				Logs:          lc.flush(),
+			}, nil
+		case CheckpointModeAuto, CheckpointModeLLMEval:
+			// synchronous — fall through to executeNode
+		}
+	}
+
 	// Skip unsupported node types
 	switch currentNode.Type {
-	case NodeTypeLLM, NodeTypeTerminal, NodeTypeWebhook, NodeTypeRoute:
+	case NodeTypeLLM, NodeTypeTerminal, NodeTypeWebhook, NodeTypeRoute, NodeTypeCheckpoint, NodeTypeAgent, NodeTypeTeam:
 		// handled below
 	default:
 		stepLog.Warn("skipping unsupported node type", "type", currentNode.Type, "node", currentNode.Name)
@@ -339,6 +445,16 @@ func (e *Engine) Run(ctx context.Context, task string) (*RunResult, error) {
 		result, _ := e.Step(ctx, state, nodeID) // Step never returns a non-nil error
 		allLogs = append(allLogs, result.Logs...)
 
+		// Checkpoint suspension: Run() cannot continue without external input.
+		if result.WaitCondition != nil {
+			return &RunResult{
+				Variables: state.Variables,
+				Steps:     state.Steps,
+				Reason:    "checkpoint",
+				Logs:      allLogs,
+			}, fmt.Errorf("run suspended at checkpoint %q: use Step/ResumeStep for checkpoint support", result.WaitCondition.NodeName)
+		}
+
 		if result.Done {
 			rr := &RunResult{
 				Output:     result.Output,
@@ -364,6 +480,70 @@ func (e *Engine) Run(ctx context.Context, task string) (*RunResult, error) {
 		Steps:     state.Steps,
 		Reason:    "max_steps",
 		Logs:      allLogs,
+	}, nil
+}
+
+// ResumeStep resumes execution after a checkpoint suspension.
+// nodeID must be the checkpoint node that suspended (WaitCondition.NodeID).
+// The response is applied to state, and the engine routes to the next node.
+func (e *Engine) ResumeStep(ctx context.Context, state *State, nodeID string, response CheckpointResponse) (*StepResult, error) {
+	node, ok := e.pathway.NodeByID[nodeID]
+	if !ok {
+		return nil, fmt.Errorf("node %q not found in pathway", nodeID)
+	}
+	switch node.Type {
+	case NodeTypeCheckpoint, NodeTypeAgent, NodeTypeTeam:
+		// valid — these node types support resume
+	default:
+		return nil, fmt.Errorf("node %q is type %q, not a resumable node (checkpoint, agent, or team)", nodeID, node.Type)
+	}
+
+	// Store the response value in the designated variable.
+	if node.CheckpointVariable != "" {
+		state.Variables[node.CheckpointVariable] = response.Value
+	}
+	// Merge any extra variables from the response.
+	if response.Vars != nil {
+		state.SetVars(response.Vars)
+	}
+
+	// Route to the next node using outgoing edges.
+	edges := e.pathway.EdgesFrom[nodeID]
+	nextNodeID := ""
+	routeReason := "no outgoing edges"
+	if len(edges) == 1 {
+		nextNodeID = edges[0].Target
+		routeReason = "single edge"
+	} else if len(edges) > 1 {
+		// For multiple edges, use the checkpoint variable value to pick.
+		// This delegates to the standard edge-following; the caller
+		// typically chains a Route node after the checkpoint.
+		nextNodeID = edges[0].Target
+		routeReason = "first edge (multiple)"
+	}
+
+	sl := Step{
+		NodeID:      node.ID,
+		NodeName:    node.Name,
+		Vars:        copyVars(response.Vars),
+		RouteReason: routeReason,
+		NextNode:    nextNodeID,
+		ResumeValue: response.Value,
+		ChildRuns:   response.ChildRuns,
+	}
+	state.Steps = append(state.Steps, sl)
+
+	if nextNodeID == "" {
+		return &StepResult{
+			Step:   sl,
+			Done:   true,
+			Reason: "dead_end",
+		}, nil
+	}
+
+	return &StepResult{
+		Step:       sl,
+		NextNodeID: nextNodeID,
 	}, nil
 }
 

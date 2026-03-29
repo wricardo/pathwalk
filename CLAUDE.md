@@ -38,6 +38,12 @@ This is a Go library (package `pathwalk`) that executes conversational pathway J
 - `NodeTypeRoute` node: pure-Go condition evaluation against `state.Variables` (no LLM call)
 - `NodeTypeTerminal` node: returns `TerminalText` as final output — terminates the run
 - `NodeTypeWebhook` node: HTTP call with `{{variable}}` template substitution in body
+- `NodeTypeCheckpoint` node: suspends or evaluates a gate. Four modes:
+  - `human_input` / `human_approval`: suspends — `Step()` returns `WaitCondition`, caller collects input, calls `ResumeStep()`
+  - `llm_eval`: LLM evaluates pass/fail against criteria (synchronous, no suspend)
+  - `auto`: deterministic condition check, writes pass/fail to a variable (synchronous, no suspend)
+- `NodeTypeAgent` node: spawns a single child agent run. Suspends with `WaitCondition{Mode: "agent", AgentTask: ...}`. Caller runs the child, calls `ResumeStep` with output in `Vars`.
+- `NodeTypeTeam` node: spawns multiple child agents with a strategy. Suspends with `WaitCondition{Mode: "team", TeamTasks: [...], TeamStrategy: "parallel"|"race"|"sequence"}`. Caller runs children per strategy, calls `ResumeStep` with all outputs in `Vars`.
 
 **Routing (`router.go`):**
 - Single outgoing edge → follow it automatically
@@ -94,22 +100,33 @@ engine := pathwalk.NewEngine(pathway, llm, pathwalk.WithLogger(customLog))
 
 During `Step()` execution, logs are captured per-step in `StepResult.Logs`.
 
-**`RunResult.Reason` values:** `"terminal"`, `"max_steps"`, `"error"`, `"dead_end"`, `"missing_node"`, `"max_node_visits"`
+**`RunResult.Reason` values:** `"terminal"`, `"max_steps"`, `"error"`, `"dead_end"`, `"missing_node"`, `"max_node_visits"`, `"checkpoint"`
 
 **`StepResult` (returned by `engine.Step()`):**
 - `Step`: The step record (node executed, output, variables extracted)
 - `NextNodeID`: Node to execute next (empty when `Done==true`)
 - `Done`: True when run should terminate
-- `Reason`: Why termination occurred — `"terminal"`, `"dead_end"`, `"error"`, `"missing_node"`, `"max_node_visits"`
+- `Reason`: Why termination occurred — `"terminal"`, `"dead_end"`, `"error"`, `"missing_node"`, `"max_node_visits"`, `"checkpoint"`
 - `Output`: Text output from the node
 - `Error`: Error message if applicable
 - `Logs`: Log records captured during this step
+- `WaitCondition`: Non-nil when a checkpoint suspends execution (human_input/human_approval modes)
+
+**`engine.ResumeStep(ctx, state, nodeID, CheckpointResponse)`** resumes after a checkpoint.
+Pass the `WaitCondition.NodeID` and a `CheckpointResponse{Value, Vars, ChildRuns}`. Returns a `*StepResult`
+with `NextNodeID` set for continued stepping. Works for Checkpoint, Agent, and Team nodes.
+
+**Step logging:** Every step records `ResumeValue` (what was submitted) and `ChildRuns` (child agent
+execution traces). Suspend steps include descriptive `Output` (e.g. `[human_approval] prompt text`,
+`[agent] Spawning child "name"`, `[team:parallel] Spawning N agents`). `ChildRun{Name, AgentID, Output, Steps}`
+captures the full trace of each child agent.
 
 ## Pathway JSON format
 
 Pathways are JSON files with `nodes` and `edges` arrays. The parser maps raw JSON type strings
 to normalized NodeType constants: `"Default"` → `NodeTypeLLM`, `"End Call"` → `NodeTypeTerminal`,
-`"Webhook"` → `NodeTypeWebhook`, `"Route"` → `NodeTypeRoute`.
+`"Webhook"` → `NodeTypeWebhook`, `"Route"` → `NodeTypeRoute`, `"Checkpoint"` → `NodeTypeCheckpoint`,
+`"Agent"` → `NodeTypeAgent`, `"Team"` → `NodeTypeTeam`.
 
 Key `node.data` fields:
 - `isStart: true` — marks the entry node
@@ -117,6 +134,12 @@ Key `node.data` fields:
 - `routes: [{conditions: [{field, operator, value}], targetNodeId}]` — Route node rules
 - `condition` — exit condition hint passed to the LLM for routing decisions
 - `modelOptions.newTemperature` — per-node LLM temperature
+- `checkpointMode` — Checkpoint mode: `"human_input"`, `"human_approval"`, `"llm_eval"`, `"auto"`
+- `checkpointPrompt` — text shown to the human or used as LLM eval context
+- `checkpointVariable` — variable name to store the checkpoint response
+- `checkpointCriteria` — pass/fail criteria for `llm_eval` mode
+- `checkpointConditions` — deterministic conditions for `auto` mode (same format as route conditions)
+- `checkpointOptions` — custom options for `human_approval` (default: `["approve", "reject"]`)
 
 `extractVars` tuple format: `[name(string), type("string"|"integer"|"boolean"), description(string), required(bool)]`
 

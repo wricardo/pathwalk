@@ -46,6 +46,9 @@ A pathway is a JSON object with `nodes` and `edges` arrays.
 | `"End Call"` | `NodeTypeTerminal` |
 | `"Webhook"` | `NodeTypeWebhook` |
 | `"Route"` | `NodeTypeRoute` |
+| `"Checkpoint"` | `NodeTypeCheckpoint` |
+| `"Agent"` | `NodeTypeAgent` |
+| `"Team"` | `NodeTypeTeam` |
 
 For `"End Call"` nodes, `data.text` is the terminal text returned as the final output.
 
@@ -198,6 +201,96 @@ Declarative tools scoped to a single node. Only visible to the LLM when executin
   - `"default"` — always matches (use as fallback)
   - `"BlandStatusCode"` — matches on HTTP status code using operator/value
   - When a pathway with a non-empty `nodeId` matches, it overrides normal edge routing via `$tool_route` state variable
+
+## Checkpoint Node
+
+Suspends execution for external input or evaluates a gate condition.
+
+```json
+{
+  "id": "approval-gate",
+  "type": "Checkpoint",
+  "data": {
+    "name": "Approval Gate",
+    "checkpointMode": "human_approval",
+    "checkpointPrompt": "Do you approve this action?",
+    "checkpointVariable": "approval_status",
+    "checkpointOptions": ["approve", "reject"]
+  }
+}
+```
+
+### Checkpoint Modes
+
+| Mode | Suspends? | Behavior |
+|------|-----------|----------|
+| `human_input` | Yes | Waits for freeform text input |
+| `human_approval` | Yes | Waits for one of the defined options (default: approve/reject) |
+| `llm_eval` | No | LLM evaluates pass/fail against `checkpointCriteria` |
+| `auto` | No | Deterministic condition check using `checkpointConditions` |
+
+### Checkpoint Fields
+
+- `checkpointMode` (required) — one of the four modes above
+- `checkpointPrompt` — text shown to the human or used as LLM eval context
+- `checkpointVariable` — variable name to store the response (`"pass"`/`"fail"` for auto/llm_eval, user input for human modes)
+- `checkpointCriteria` — pass/fail criteria text (llm_eval only)
+- `checkpointConditions` — array of condition objects, same format as route conditions (auto only)
+- `checkpointOptions` — custom options array for human_approval (default: `["approve", "reject"]`)
+
+After a checkpoint, the stored variable is available for downstream Route nodes to branch on.
+
+## Agent Node
+
+Spawns a single child agent run and suspends until it completes.
+
+```json
+{
+  "id": "research",
+  "type": "Agent",
+  "data": {
+    "name": "Research Agent",
+    "agentId": "agent-researcher-123",
+    "task": "Research {{topic}} and summarize.",
+    "outputVar": "research_summary"
+  }
+}
+```
+
+- `agentId`: ID of the child agent (an Agent record in the DB with its own pathway + tools)
+- `task`: task template — `{{variable}}` placeholders are resolved from parent state
+- `outputVar`: variable name where the child's output is stored in parent state
+
+The engine suspends with `WaitCondition{Mode: "agent", AgentTask: {...}}`. The caller spawns the child, collects the result, and calls `ResumeStep` with the output in `CheckpointResponse.Vars`.
+
+## Team Node
+
+Spawns multiple child agent runs with a coordination strategy.
+
+```json
+{
+  "id": "review-team",
+  "type": "Team",
+  "data": {
+    "name": "Review Team",
+    "strategy": "parallel",
+    "agents": [
+      {"name": "Bugs", "agentId": "agent-bugs", "task": "Find bugs in {{code}}", "outputVar": "bug_report"},
+      {"name": "Security", "agentId": "agent-sec", "task": "Security review: {{code}}", "outputVar": "sec_report"}
+    ]
+  }
+}
+```
+
+### Team strategies
+
+| Strategy | Behavior |
+|----------|----------|
+| `parallel` | Spawn all, wait for all, merge all outputs |
+| `race` | Spawn all, use first to complete, cancel rest |
+| `sequence` | Run in order, each gets prior agent outputs |
+
+The engine suspends with `WaitCondition{Mode: "team", TeamTasks: [...], TeamStrategy: "..."}`. The caller handles coordination and calls `ResumeStep` with all outputs in `Vars`.
 
 ## Global Nodes
 

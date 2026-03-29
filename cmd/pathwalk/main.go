@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/urfave/cli/v2"
 	pathwalk "github.com/wricardo/pathwalk"
@@ -117,32 +119,122 @@ func runPathway(c *cli.Context) error {
 
 	engine := pathwalk.NewEngine(pathway, llm, opts...)
 
-	result, err := engine.Run(c.Context, c.String("task"))
-	if err != nil {
-		return fmt.Errorf("running pathway: %w", err)
+	if pathway.StartNode == nil {
+		return fmt.Errorf("pathway has no start node")
 	}
 
-	// Print result
-	fmt.Printf("\n=== Result ===\n")
-	fmt.Printf("Reason: %s\n", result.Reason)
-	fmt.Printf("Output:\n%s\n", result.Output)
+	ctx := c.Context
+	state := pathwalk.NewState(c.String("task"))
+	nodeID := pathway.StartNode.ID
+	verbose := c.Bool("verbose")
+	maxSteps := c.Int("max-steps")
+	scanner := bufio.NewScanner(os.Stdin)
 
-	if len(result.Variables) > 0 {
+	for step := 0; step < maxSteps; step++ {
+		result, err := engine.Step(ctx, state, nodeID)
+		if err != nil {
+			return fmt.Errorf("step error: %w", err)
+		}
+
+		if verbose && result.Output != "" {
+			fmt.Printf("[%s] %s\n", result.Step.NodeName, truncate(result.Output, 200))
+		}
+
+		// Handle checkpoint suspension — prompt the user on stdin.
+		if result.WaitCondition != nil {
+			wc := result.WaitCondition
+			response, err := promptCheckpoint(wc, scanner)
+			if err != nil {
+				return fmt.Errorf("reading checkpoint input: %w", err)
+			}
+
+			resumeResult, err := engine.ResumeStep(ctx, state, wc.NodeID, response)
+			if err != nil {
+				return fmt.Errorf("resume error: %w", err)
+			}
+			if resumeResult.Done {
+				break
+			}
+			nodeID = resumeResult.NextNodeID
+			continue
+		}
+
+		if result.Done {
+			if result.Output != "" {
+				fmt.Printf("\n=== Result ===\n")
+				fmt.Printf("Reason: %s\n", result.Reason)
+				fmt.Printf("Output:\n%s\n", result.Output)
+			}
+			break
+		}
+
+		nodeID = result.NextNodeID
+	}
+
+	if len(state.Variables) > 0 {
 		fmt.Printf("\n=== Variables ===\n")
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		enc.Encode(result.Variables)
+		enc.Encode(state.Variables)
 	}
 
-	if c.Bool("verbose") && len(result.Steps) > 0 {
-		fmt.Printf("\n=== Steps (%d) ===\n", len(result.Steps))
-		for i, s := range result.Steps {
+	if verbose && len(state.Steps) > 0 {
+		fmt.Printf("\n=== Steps (%d) ===\n", len(state.Steps))
+		for i, s := range state.Steps {
 			fmt.Printf("%d. [%s] → %s\n   %s\n",
 				i+1, s.NodeName, s.NextNode, truncate(s.Output, 200))
 		}
 	}
 
 	return nil
+}
+
+// promptCheckpoint prints a checkpoint prompt and reads the response from stdin.
+// It retries on empty input and validates approval options.
+func promptCheckpoint(wc *pathwalk.WaitCondition, scanner *bufio.Scanner) (pathwalk.CheckpointResponse, error) {
+	fmt.Printf("\n--- Checkpoint: %s ---\n", wc.NodeName)
+	fmt.Printf("%s\n", wc.Prompt)
+
+	for {
+		switch wc.Mode {
+		case pathwalk.CheckpointModeHumanApproval:
+			options := strings.Join(wc.Options, "/")
+			fmt.Printf("[%s]: ", options)
+		case pathwalk.CheckpointModeHumanInput:
+			fmt.Printf("> ")
+		}
+
+		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				return pathwalk.CheckpointResponse{}, err
+			}
+			return pathwalk.CheckpointResponse{}, fmt.Errorf("unexpected end of input")
+		}
+		value := strings.TrimSpace(scanner.Text())
+
+		if value == "" {
+			fmt.Println("Input required.")
+			continue
+		}
+
+		// Validate approval options.
+		if wc.Mode == pathwalk.CheckpointModeHumanApproval && len(wc.Options) > 0 {
+			valid := false
+			for _, opt := range wc.Options {
+				if strings.EqualFold(value, opt) {
+					value = opt // normalize to exact option string
+					valid = true
+					break
+				}
+			}
+			if !valid {
+				fmt.Printf("Invalid choice. Please enter one of: %s\n", strings.Join(wc.Options, ", "))
+				continue
+			}
+		}
+
+		return pathwalk.CheckpointResponse{Value: value}, nil
+	}
 }
 
 func parseHeaders(pairs []string) map[string]string {

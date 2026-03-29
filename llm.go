@@ -31,6 +31,12 @@ type CompletionRequest struct {
 }
 
 // CompletionResponse is the output from LLMClient.Complete.
+//
+// When Complete returns both a non-nil response and a non-nil error (e.g. the
+// tool-call round limit was exceeded), ToolCalls contains the tool calls the
+// LLM emitted before the error occurred. These calls were NOT executed — they
+// are recorded so callers can surface what was attempted. Content will be
+// empty in this partial-error case.
 type CompletionResponse struct {
 	Content   string
 	ToolCalls []ToolCall

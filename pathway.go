@@ -53,6 +53,31 @@ type nodeDataJSON struct {
 
 	// Per-node visit cap override (0 = use pathway default)
 	MaxVisits int `json:"maxVisits"`
+
+	// Checkpoint fields
+	CheckpointMode       string               `json:"checkpointMode"`
+	CheckpointPrompt     string               `json:"checkpointPrompt"`
+	CheckpointCriteria   string               `json:"checkpointCriteria"`
+	CheckpointVariable   string               `json:"checkpointVariable"`
+	CheckpointOptions    []string             `json:"checkpointOptions"`
+	CheckpointConditions []routeConditionJSON `json:"checkpointConditions"`
+	WaitDuration         string               `json:"waitDuration"`
+
+	// Agent node fields
+	AgentNodeID  string `json:"agentId"`
+	AgentNodeTask string `json:"task"`
+	OutputVar    string `json:"outputVar"`
+
+	// Team node fields
+	Strategy string             `json:"strategy"`
+	Agents   []agentTaskDefJSON `json:"agents"`
+}
+
+type agentTaskDefJSON struct {
+	Name      string `json:"name"`
+	AgentID   string `json:"agentId"`
+	Task      string `json:"task"`
+	OutputVar string `json:"outputVar"`
 }
 
 type nodeToolJSON struct {
@@ -198,10 +223,13 @@ func parseToolResponsePathway(raw json.RawMessage) ToolResponsePathway {
 
 // rawTypeToNodeType maps raw JSON type strings to normalized NodeType constants.
 var rawTypeToNodeType = map[string]NodeType{
-	"Default":  NodeTypeLLM,
-	"End Call": NodeTypeTerminal,
-	"Webhook":  NodeTypeWebhook,
-	"Route":    NodeTypeRoute,
+	"Default":    NodeTypeLLM,
+	"End Call":   NodeTypeTerminal,
+	"Webhook":    NodeTypeWebhook,
+	"Route":      NodeTypeRoute,
+	"Checkpoint": NodeTypeCheckpoint,
+	"Agent":      NodeTypeAgent,
+	"Team":       NodeTypeTeam,
 }
 
 func parseNodeType(raw string) NodeType {
@@ -281,6 +309,32 @@ func ParsePathwayBytes(data []byte) (*Pathway, error) {
 			FallbackNodeID: rn.Data.FallbackNodeID,
 
 			MaxVisits: rn.Data.MaxVisits,
+
+			// Checkpoint
+			CheckpointMode:     CheckpointMode(rn.Data.CheckpointMode),
+			CheckpointPrompt:   rn.Data.CheckpointPrompt,
+			CheckpointCriteria: rn.Data.CheckpointCriteria,
+			CheckpointVariable: rn.Data.CheckpointVariable,
+			CheckpointOptions:  rn.Data.CheckpointOptions,
+			WaitDuration:       rn.Data.WaitDuration,
+
+			// Agent node
+			AgentID:        rn.Data.AgentNodeID,
+			AgentTask:      rn.Data.AgentNodeTask,
+			AgentOutputVar: rn.Data.OutputVar,
+
+			// Team node
+			TeamStrategy: rn.Data.Strategy,
+		}
+
+		// Parse team agents
+		for _, a := range rn.Data.Agents {
+			n.TeamAgents = append(n.TeamAgents, AgentTaskDef{
+				Name:      a.Name,
+				AgentID:   a.AgentID,
+				Task:      a.Task,
+				OutputVar: a.OutputVar,
+			})
 		}
 
 		// Parse extractVars — each element is [name, type, description, required]
@@ -293,6 +347,13 @@ func ParsePathwayBytes(data []byte) (*Pathway, error) {
 				return nil, fmt.Errorf("node %q extractVars[%d]: malformed tuple (must have at least 3 elements: name, type, description)", rn.Data.Name, i)
 			}
 			n.ExtractVars = append(n.ExtractVars, *vd)
+		}
+
+		// Parse checkpoint conditions
+		for _, cc := range rn.Data.CheckpointConditions {
+			n.CheckpointConditions = append(n.CheckpointConditions, RouteCondition{
+				Field: cc.Field, Operator: cc.Operator, Value: cc.Value,
+			})
 		}
 
 		// Parse route rules

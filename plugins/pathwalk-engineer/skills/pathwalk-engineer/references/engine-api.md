@@ -106,16 +106,39 @@ for {
 
 ```go
 type StepResult struct {
-    Step       Step       // The step record (node, output, vars extracted)
-    NextNodeID string     // Empty when Done == true
-    Done       bool
-    Reason     string     // "terminal", "dead_end", "error", "missing_node", "max_node_visits"
-    Output     string
-    Error      string     // Human-readable error message when Reason is "error"
-    FailedNode string     // Node name when Reason is "error" or "max_node_visits"
-    Logs       []LogEntry // Log records from this step only
+    Step          Step           // The step record (node, output, vars extracted)
+    NextNodeID    string         // Empty when Done == true
+    Done          bool
+    Reason        string         // "terminal", "dead_end", "error", "missing_node", "max_node_visits", "checkpoint"
+    Output        string
+    Error         string         // Human-readable error message when Reason is "error"
+    FailedNode    string         // Node name when Reason is "error" or "max_node_visits"
+    Logs          []LogEntry     // Log records from this step only
+    WaitCondition *WaitCondition // Non-nil when a checkpoint suspends (human_input/human_approval)
 }
 ```
+
+### Checkpoint Suspend/Resume
+
+When `Step()` hits a suspending checkpoint node, it returns `WaitCondition != nil` with `Done == false`.
+The caller collects external input and calls `ResumeStep`:
+
+```go
+for {
+    result, _ := engine.Step(ctx, state, nodeID)
+    if result.WaitCondition != nil {
+        // Suspended — collect input from human/external system
+        response := pathwalk.CheckpointResponse{Value: "approve"}
+        result, _ = engine.ResumeStep(ctx, state, result.WaitCondition.NodeID, response)
+    }
+    if result.Done {
+        break
+    }
+    nodeID = result.NextNodeID
+}
+```
+
+`ResumeStep` stores the response value in `state.Variables[node.CheckpointVariable]`, merges any extra `response.Vars`, then routes to the next node via outgoing edges. Works for `NodeTypeCheckpoint`, `NodeTypeAgent`, and `NodeTypeTeam` nodes.
 
 ## LLM Client
 

@@ -36,6 +36,8 @@ func executeNode(ctx context.Context, node *Node, state *State, llm LLMClient, t
 		return executeWebhook(ctx, node, state)
 	case NodeTypeRoute:
 		return &nodeOutput{}, nil // routing is handled by the engine
+	case NodeTypeCheckpoint:
+		return executeCheckpoint(ctx, node, state, llm, log)
 	default:
 		return nil, fmt.Errorf("unsupported node type: %s", node.Type)
 	}
@@ -185,6 +187,13 @@ func extractVars(ctx context.Context, node *Node, text string, llm LLMClient, lo
 				llmVars = append(llmVars, v)
 				continue
 			}
+			if extracted == nil && v.Required {
+				// JQ produced no value for a required variable — fall back to LLM.
+				log.Warn("jq returned nil for required variable, will use LLM", "var", v.Name, "jq", v.JQ)
+				llmVars = append(llmVars, v)
+				continue
+			}
+			log.Debug("variable extracted via jq", "var", v.Name, "value", extracted)
 			result[v.Name] = extracted
 		} else {
 			llmVars = append(llmVars, v)
@@ -630,6 +639,89 @@ func matchCondition(actual, operator, expected string) bool {
 		return actual <= expected
 	default:
 		return false
+	}
+}
+
+// executeCheckpoint handles synchronous checkpoint modes (auto and llm_eval).
+// Human modes are handled by the engine before reaching executeNode.
+func executeCheckpoint(ctx context.Context, node *Node, state *State, llm LLMClient, log *slog.Logger) (*nodeOutput, error) {
+	switch node.CheckpointMode {
+	case CheckpointModeAuto:
+		result := "fail"
+		if allConditionsMet(node.CheckpointConditions, state.Variables) {
+			result = "pass"
+		}
+		vars := map[string]any{}
+		if node.CheckpointVariable != "" {
+			vars[node.CheckpointVariable] = result
+		}
+		log.Debug("auto checkpoint evaluated", "node", node.Name, "result", result)
+		return &nodeOutput{Text: result, Vars: vars}, nil
+
+	case CheckpointModeLLMEval:
+		ctx = WithCallPurpose(ctx, "checkpoint_eval")
+
+		// Build the evaluation prompt from criteria and current state.
+		evalPrompt := fmt.Sprintf(
+			"Evaluate whether the current state meets the following criteria.\n\nCriteria: %s\n\nCurrent variables:\n%s\n\nPrevious steps:\n%s\n\nCall checkpoint_eval with result \"pass\" or \"fail\" and a brief reason.",
+			node.CheckpointCriteria,
+			state.VarsSummary(),
+			state.StepsSummary(),
+		)
+
+		checkpointEvalTool := Tool{
+			Name:        "checkpoint_eval",
+			Description: "Report whether the checkpoint criteria are met.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"result": map[string]any{
+						"type":        "string",
+						"description": "Either \"pass\" or \"fail\"",
+						"enum":        []string{"pass", "fail"},
+					},
+					"reason": map[string]any{
+						"type":        "string",
+						"description": "Brief explanation",
+					},
+				},
+				"required": []string{"result"},
+			},
+			Fn: func(ctx context.Context, args map[string]any) (any, error) {
+				return args, nil
+			},
+		}
+
+		resp, err := llm.Complete(ctx, CompletionRequest{
+			Messages: []Message{
+				{Role: "system", Content: "You are evaluating a quality gate in an agentic workflow. Assess the current state against the criteria and call checkpoint_eval."},
+				{Role: "user", Content: evalPrompt},
+			},
+			Tools: []Tool{checkpointEvalTool},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("checkpoint llm_eval: %w", err)
+		}
+
+		result := "fail" // default to fail if LLM doesn't call the tool
+		for _, tc := range resp.ToolCalls {
+			if tc.Name == "checkpoint_eval" {
+				if r, ok := tc.Args["result"].(string); ok {
+					result = r
+				}
+				break
+			}
+		}
+
+		vars := map[string]any{}
+		if node.CheckpointVariable != "" {
+			vars[node.CheckpointVariable] = result
+		}
+		log.Debug("llm_eval checkpoint evaluated", "node", node.Name, "result", result)
+		return &nodeOutput{Text: result, Vars: vars}, nil
+
+	default:
+		return nil, fmt.Errorf("unsupported checkpoint mode: %s", node.CheckpointMode)
 	}
 }
 

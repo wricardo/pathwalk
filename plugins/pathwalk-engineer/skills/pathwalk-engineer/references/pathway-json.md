@@ -224,21 +224,65 @@ Suspends execution for external input or evaluates a gate condition.
 
 | Mode | Suspends? | Behavior |
 |------|-----------|----------|
-| `human_input` | Yes | Waits for freeform text input |
+| `human_input` | Yes | Waits for freeform text input. With `extractVars`, renders a typed form. |
 | `human_approval` | Yes | Waits for one of the defined options (default: approve/reject) |
 | `llm_eval` | No | LLM evaluates pass/fail against `checkpointCriteria` |
 | `auto` | No | Deterministic condition check using `checkpointConditions` |
+| `wait` | Yes | Suspends for a duration or external event. Caller handles sleeping/signaling. |
 
 ### Checkpoint Fields
 
-- `checkpointMode` (required) — one of the four modes above
+- `checkpointMode` (required) — one of the five modes above
 - `checkpointPrompt` — text shown to the human or used as LLM eval context
 - `checkpointVariable` — variable name to store the response (`"pass"`/`"fail"` for auto/llm_eval, user input for human modes)
 - `checkpointCriteria` — pass/fail criteria text (llm_eval only)
 - `checkpointConditions` — array of condition objects, same format as route conditions (auto only)
 - `checkpointOptions` — custom options array for human_approval (default: `["approve", "reject"]`)
+- `waitDuration` — Go duration string for wait mode (e.g. `"24h"`, `"5m"`). Empty = event-driven wait.
+- `extractVars` — on `human_input` checkpoints, defines typed form fields instead of freeform text
 
 After a checkpoint, the stored variable is available for downstream Route nodes to branch on.
+
+### Structured Form Collection
+
+When a `human_input` checkpoint has `extractVars`, the UI renders a typed form:
+
+```json
+{
+  "type": "Checkpoint",
+  "data": {
+    "checkpointMode": "human_input",
+    "checkpointPrompt": "Schedule the callback:",
+    "extractVars": [
+      ["customer_name", "string", "Customer name", true],
+      ["callback_time", "datetime", "Callback date/time", true],
+      ["item_count", "integer", "Number of items", false],
+      ["is_urgent", "boolean", "Urgent?", false]
+    ]
+  }
+}
+```
+
+Supported types: `"string"`, `"integer"`, `"boolean"`, `"datetime"`. The response comes back in `CheckpointResponse.Vars` with each variable as a key.
+
+### Wait Mode
+
+Suspends execution for a duration or until an external event:
+
+```json
+{
+  "type": "Checkpoint",
+  "data": {
+    "checkpointMode": "wait",
+    "checkpointPrompt": "Waiting 24 hours before follow-up.",
+    "checkpointVariable": "wait_result",
+    "waitDuration": "24h"
+  }
+}
+```
+
+- With `waitDuration`: caller sleeps, then resumes with `value: "timer_expired"`
+- Without `waitDuration`: caller waits for an external signal (webhook, event), then resumes with the event payload
 
 ## Agent Node
 

@@ -134,14 +134,23 @@ Key `node.data` fields:
 - `routes: [{conditions: [{field, operator, value}], targetNodeId}]` — Route node rules
 - `condition` — exit condition hint passed to the LLM for routing decisions
 - `modelOptions.newTemperature` — per-node LLM temperature
-- `checkpointMode` — Checkpoint mode: `"human_input"`, `"human_approval"`, `"llm_eval"`, `"auto"`
+- `checkpointMode` — Checkpoint mode: `"human_input"`, `"human_approval"`, `"llm_eval"`, `"auto"`, `"wait"`
 - `checkpointPrompt` — text shown to the human or used as LLM eval context
 - `checkpointVariable` — variable name to store the checkpoint response
 - `checkpointCriteria` — pass/fail criteria for `llm_eval` mode
 - `checkpointConditions` — deterministic conditions for `auto` mode (same format as route conditions)
 - `checkpointOptions` — custom options for `human_approval` (default: `["approve", "reject"]`)
+- `waitDuration` — Go duration string for `wait` mode (e.g. `"24h"`, `"5m"`). Empty = event-driven wait
+- `agentId` — Agent node: ID of the child agent to spawn
+- `task` — Agent node: task template with `{{variable}}` placeholders resolved from state
+- `outputVar` — Agent node: variable name for the child agent's output in parent state
+- `strategy` — Team node: `"parallel"`, `"race"`, or `"sequence"`
+- `agents` — Team node: array of `{name, agentId, task, outputVar}` child agent definitions
 
-`extractVars` tuple format: `[name(string), type("string"|"integer"|"boolean"), description(string), required(bool)]`
+`extractVars` tuple format: `[name(string), type("string"|"integer"|"boolean"|"datetime"), description(string), required(bool)]`
+
+When `extractVars` is present on a `human_input` checkpoint, the UI renders a typed form instead of
+freeform text. Each variable becomes a form field with the appropriate input type.
 
 Route condition operators: `"is"`, `"is not"`, `"contains"`, `"not contains"`, `">"`, `"<"`, `">="`, `"<="`
 

@@ -3,3 +3,4 @@
 /pathwalk-ui
 node_modules/
 ui/node_modules/
+.claude/settings.local.json

@@ -1,0 +1,31 @@
+{
+  "nodes": [
+    {
+      "id": "start",
+      "type": "Default",
+      "data": {
+        "name": "Fetch and Process Orders",
+        "isStart": true,
+        "prompt": "You have access to http_request, jq, and grep tools. Your task: 1) Fetch data from the API, 2) Use jq to extract customer names and amounts, 3) Identify high-value orders (>1000), 4) Return a summary.",
+        "extractVars": [
+          ["high_value_customers", "string", "Comma-separated list of customers with orders over $1000", true]
+        ]
+      }
+    },
+    {
+      "id": "end",
+      "type": "End Call",
+      "data": {
+        "name": "Complete",
+        "terminalText": "Processing complete. High-value customers: {{high_value_customers}}"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "start",
+      "target": "end"
+    }
+  ]
+}

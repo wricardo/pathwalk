@@ -105,6 +105,8 @@ func llmRoute(
 	)
 
 	resp, err := llm.Complete(ctx, CompletionRequest{
+		Model:    node.Model,
+		Provider: node.LLMProvider,
 		Messages: []Message{
 			{
 				Role:    "system",

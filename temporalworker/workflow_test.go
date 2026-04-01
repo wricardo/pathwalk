@@ -2,6 +2,7 @@ package temporalworker
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/mock"
@@ -568,4 +569,345 @@ func TestPathwayWorkflow_DefaultMaxSteps(t *testing.T) {
 	require.NoError(t, env.GetWorkflowResult(&result))
 	require.Equal(t, "max_steps", result.Reason)
 	require.Equal(t, 50, callCount, "default MaxSteps should be 50")
+}
+
+// ── Checkpoint / signal tests ──────────────────────────────────────────────
+
+// checkpointPathwayJSON: start → checkpoint(human_input) → end
+const checkpointPathwayJSON = `{
+  "nodes": [
+    {"id":"n1","type":"Default","data":{"name":"Start","isStart":true,"prompt":"Hello","condition":"done"}},
+    {"id":"cp1","type":"Checkpoint","data":{"name":"Ask Name","checkpointMode":"human_input","checkpointPrompt":"What is your name?","checkpointVariable":"user_name"}},
+    {"id":"n2","type":"End Call","data":{"name":"End","text":"Goodbye"}}
+  ],
+  "edges": [
+    {"id":"e1","source":"n1","target":"cp1","data":{"label":"continue","description":""}},
+    {"id":"e2","source":"cp1","target":"n2","data":{"label":"continue","description":""}}
+  ]
+}`
+
+// twoCheckpointPathwayJSON: start → cp1 → cp2 → end
+const twoCheckpointPathwayJSON = `{
+  "nodes": [
+    {"id":"n1","type":"Default","data":{"name":"Start","isStart":true,"prompt":"Hello","condition":"done"}},
+    {"id":"cp1","type":"Checkpoint","data":{"name":"First Question","checkpointMode":"human_input","checkpointPrompt":"First?","checkpointVariable":"answer1"}},
+    {"id":"cp2","type":"Checkpoint","data":{"name":"Second Question","checkpointMode":"human_input","checkpointPrompt":"Second?","checkpointVariable":"answer2"}},
+    {"id":"n2","type":"End Call","data":{"name":"End","text":"Done"}}
+  ],
+  "edges": [
+    {"id":"e1","source":"n1","target":"cp1","data":{"label":"continue","description":""}},
+    {"id":"e2","source":"cp1","target":"cp2","data":{"label":"continue","description":""}},
+    {"id":"e3","source":"cp2","target":"n2","data":{"label":"continue","description":""}}
+  ]
+}`
+
+// TestExecuteResumeStep_Success tests the ExecuteResumeStep activity directly.
+// ResumeStep does not call the LLM — it stores the response value and routes to
+// the next node — so no mock LLM is required.
+func TestExecuteResumeStep_Success(t *testing.T) {
+	t.Cleanup(clearPathwayCache)
+	suite := &testsuite.WorkflowTestSuite{}
+	env := suite.NewTestActivityEnvironment()
+
+	acts := &PathwayActivities{} // no LLM needed
+	env.RegisterActivity(acts.ExecuteResumeStep)
+
+	state := pathwalk.NewState("test task")
+	input := ResumeStepActivityInput{
+		PathwayJSON:  []byte(checkpointPathwayJSON),
+		State:        state,
+		ResumeNodeID: "cp1",
+		Signal:       ResumeSignal{Value: "Alice"},
+	}
+
+	val, err := env.ExecuteActivity(acts.ExecuteResumeStep, input)
+	require.NoError(t, err)
+
+	var result ResumeStepActivityResult
+	require.NoError(t, val.Get(&result))
+	require.False(t, result.StepResult.Done)
+	require.Equal(t, "n2", result.StepResult.NextNodeID)
+	require.Equal(t, "Alice", result.State.Variables["user_name"], "signal value stored in checkpoint variable")
+}
+
+// TestExecuteResumeStep_InvalidPathway verifies that an unparseable pathway is rejected.
+func TestExecuteResumeStep_InvalidPathway(t *testing.T) {
+	t.Cleanup(clearPathwayCache)
+	suite := &testsuite.WorkflowTestSuite{}
+	env := suite.NewTestActivityEnvironment()
+
+	acts := &PathwayActivities{}
+	env.RegisterActivity(acts.ExecuteResumeStep)
+
+	input := ResumeStepActivityInput{
+		PathwayJSON:  []byte("not valid json"),
+		State:        pathwalk.NewState("test"),
+		ResumeNodeID: "cp1",
+		Signal:       ResumeSignal{Value: "anything"},
+	}
+
+	_, err := env.ExecuteActivity(acts.ExecuteResumeStep, input)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "ParsePathway")
+}
+
+// TestPathwayWorkflow_Checkpoint_ResumesOnSignal verifies the full checkpoint cycle:
+// the workflow routes through two steps (n1 → cp1), blocks at the checkpoint, the
+// resume signal unblocks it, and the workflow completes.
+func TestPathwayWorkflow_Checkpoint_ResumesOnSignal(t *testing.T) {
+	suite := &testsuite.WorkflowTestSuite{}
+	env := suite.NewTestWorkflowEnvironment()
+
+	// First call: route n1→cp1. Second call: suspend at checkpoint.
+	stepCallCount := 0
+	env.OnActivity((*PathwayActivities).ExecuteStep, mock.Anything, mock.Anything, mock.Anything).
+		Return(func(_ *PathwayActivities, _ context.Context, _ StepActivityInput) (*StepActivityResult, error) {
+			stepCallCount++
+			s := pathwalk.NewState("test")
+			if stepCallCount == 1 {
+				return &StepActivityResult{State: s, StepResult: &pathwalk.StepResult{NextNodeID: "cp1"}}, nil
+			}
+			// Second call: checkpoint node — suspend.
+			return &StepActivityResult{
+				State: s,
+				StepResult: &pathwalk.StepResult{
+					WaitCondition: &pathwalk.WaitCondition{
+						Mode:         pathwalk.CheckpointModeHumanInput,
+						NodeID:       "cp1",
+						NodeName:     "Ask Name",
+						VariableName: "user_name",
+					},
+				},
+			}, nil
+		})
+
+	// Signal is buffered in resumeCh; consumed when the workflow calls Receive.
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(ResumeSignalName, ResumeSignal{Value: "Alice"})
+	}, 0)
+
+	env.OnActivity((*PathwayActivities).ExecuteResumeStep, mock.Anything, mock.Anything, mock.Anything).
+		Return(&ResumeStepActivityResult{
+			State:      pathwalk.NewState("test"),
+			StepResult: &pathwalk.StepResult{Done: true, Reason: "terminal", Output: "Hello Alice"},
+		}, nil)
+
+	env.ExecuteWorkflow(PathwayWorkflow, PathwayInput{
+		PathwayJSON: []byte(checkpointPathwayJSON),
+		Task:        "test",
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	var result pathwalk.RunResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, "terminal", result.Reason)
+	require.Equal(t, "Hello Alice", result.Output)
+	require.Equal(t, 2, stepCallCount, "expected ExecuteStep called for n1 and cp1")
+}
+
+// TestPathwayWorkflow_Checkpoint_CallbackAfterResume verifies that the completion
+// callback fires with the correct result after a checkpoint is resumed.
+func TestPathwayWorkflow_Checkpoint_CallbackAfterResume(t *testing.T) {
+	suite := &testsuite.WorkflowTestSuite{}
+	env := suite.NewTestWorkflowEnvironment()
+
+	env.RegisterActivityWithOptions(completionCallbackStub, activity.RegisterOptions{
+		Name: "HandleComplete",
+	})
+
+	stepCallCount := 0
+	env.OnActivity((*PathwayActivities).ExecuteStep, mock.Anything, mock.Anything, mock.Anything).
+		Return(func(_ *PathwayActivities, _ context.Context, _ StepActivityInput) (*StepActivityResult, error) {
+			stepCallCount++
+			s := pathwalk.NewState("test")
+			if stepCallCount == 1 {
+				return &StepActivityResult{State: s, StepResult: &pathwalk.StepResult{NextNodeID: "cp1"}}, nil
+			}
+			return &StepActivityResult{
+				State: s,
+				StepResult: &pathwalk.StepResult{
+					WaitCondition: &pathwalk.WaitCondition{
+						Mode:   pathwalk.CheckpointModeHumanInput,
+						NodeID: "cp1",
+					},
+				},
+			}, nil
+		})
+
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(ResumeSignalName, ResumeSignal{Value: "approved"})
+	}, 0)
+
+	env.OnActivity((*PathwayActivities).ExecuteResumeStep, mock.Anything, mock.Anything, mock.Anything).
+		Return(&ResumeStepActivityResult{
+			State:      pathwalk.NewState("test"),
+			StepResult: &pathwalk.StepResult{Done: true, Reason: "terminal", Output: "done after resume"},
+		}, nil)
+
+	callbackCalled := false
+	env.OnActivity("HandleComplete", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in CompletionCallbackInput) error {
+			callbackCalled = true
+			require.Equal(t, "terminal", in.Result.Reason)
+			require.Equal(t, "done after resume", in.Result.Output)
+			require.Empty(t, in.Err)
+			return nil
+		})
+
+	env.ExecuteWorkflow(PathwayWorkflow, PathwayInput{
+		PathwayJSON:            []byte(checkpointPathwayJSON),
+		Task:                   "test",
+		CompletionTaskQueue:    "my-queue",
+		CompletionActivityName: "HandleComplete",
+		CompletionData:         "run-xyz",
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	require.True(t, callbackCalled, "completion callback should fire after checkpoint resume")
+}
+
+// TestPathwayWorkflow_MultipleCheckpoints verifies that two sequential checkpoint
+// nodes each block on their own signal and both receive the correct response.
+// Uses a counter to differentiate the three ExecuteStep calls (n1, cp1, cp2)
+// since in.CurrentNodeID is not reliably populated in the test environment when
+// signals are registered.
+func TestPathwayWorkflow_MultipleCheckpoints(t *testing.T) {
+	suite := &testsuite.WorkflowTestSuite{}
+	env := suite.NewTestWorkflowEnvironment()
+
+	// Call 1 → n1 (route to cp1). Call 2 → cp1 (first checkpoint). Call 3 → cp2 (second checkpoint).
+	stepCallCount := 0
+	env.OnActivity((*PathwayActivities).ExecuteStep, mock.Anything, mock.Anything, mock.Anything).
+		Return(func(_ *PathwayActivities, _ context.Context, _ StepActivityInput) (*StepActivityResult, error) {
+			stepCallCount++
+			s := pathwalk.NewState("test")
+			switch stepCallCount {
+			case 1:
+				return &StepActivityResult{State: s, StepResult: &pathwalk.StepResult{NextNodeID: "cp1"}}, nil
+			case 2:
+				return &StepActivityResult{
+					State: s,
+					StepResult: &pathwalk.StepResult{
+						WaitCondition: &pathwalk.WaitCondition{
+							Mode:   pathwalk.CheckpointModeHumanInput,
+							NodeID: "cp1",
+						},
+					},
+				}, nil
+			default: // call 3+: cp2
+				return &StepActivityResult{
+					State: s,
+					StepResult: &pathwalk.StepResult{
+						WaitCondition: &pathwalk.WaitCondition{
+							Mode:   pathwalk.CheckpointModeHumanInput,
+							NodeID: "cp2",
+						},
+					},
+				}, nil
+			}
+		})
+
+	// Both signals are buffered in resumeCh; each Receive call consumes one in order.
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(ResumeSignalName, ResumeSignal{Value: "first"})
+	}, 0)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(ResumeSignalName, ResumeSignal{Value: "second"})
+	}, 0)
+
+	resumeCallCount := 0
+	env.OnActivity((*PathwayActivities).ExecuteResumeStep, mock.Anything, mock.Anything, mock.Anything).
+		Return(func(_ *PathwayActivities, _ context.Context, _ ResumeStepActivityInput) (*ResumeStepActivityResult, error) {
+			resumeCallCount++
+			s := pathwalk.NewState("test")
+			if resumeCallCount == 1 {
+				// First resume: continue to cp2.
+				return &ResumeStepActivityResult{
+					State:      s,
+					StepResult: &pathwalk.StepResult{NextNodeID: "cp2"},
+				}, nil
+			}
+			// Second resume: done.
+			return &ResumeStepActivityResult{
+				State:      s,
+				StepResult: &pathwalk.StepResult{Done: true, Reason: "terminal", Output: "all done"},
+			}, nil
+		})
+
+	env.ExecuteWorkflow(PathwayWorkflow, PathwayInput{
+		PathwayJSON: []byte(twoCheckpointPathwayJSON),
+		Task:        "test",
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	var result pathwalk.RunResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, "terminal", result.Reason)
+	require.Equal(t, "all done", result.Output)
+	require.Equal(t, 3, stepCallCount, "expected ExecuteStep for n1, cp1, cp2")
+	require.Equal(t, 2, resumeCallCount, "expected ExecuteResumeStep for each checkpoint")
+}
+
+// TestPathwayWorkflow_Checkpoint_ResumeError verifies that when ExecuteResumeStep
+// returns an error the workflow calls the completion callback with Err set and
+// returns a workflow error.
+func TestPathwayWorkflow_Checkpoint_ResumeError(t *testing.T) {
+	suite := &testsuite.WorkflowTestSuite{}
+	env := suite.NewTestWorkflowEnvironment()
+
+	env.RegisterActivityWithOptions(completionCallbackStub, activity.RegisterOptions{
+		Name: "HandleComplete",
+	})
+
+	// Call 1 → route to cp1. Call 2 → suspend at checkpoint.
+	stepCallCount := 0
+	env.OnActivity((*PathwayActivities).ExecuteStep, mock.Anything, mock.Anything, mock.Anything).
+		Return(func(_ *PathwayActivities, _ context.Context, _ StepActivityInput) (*StepActivityResult, error) {
+			stepCallCount++
+			s := pathwalk.NewState("test")
+			if stepCallCount == 1 {
+				return &StepActivityResult{State: s, StepResult: &pathwalk.StepResult{NextNodeID: "cp1"}}, nil
+			}
+			return &StepActivityResult{
+				State: s,
+				StepResult: &pathwalk.StepResult{
+					WaitCondition: &pathwalk.WaitCondition{
+						Mode:   pathwalk.CheckpointModeHumanInput,
+						NodeID: "cp1",
+					},
+				},
+			}, nil
+		})
+
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(ResumeSignalName, ResumeSignal{Value: "Alice"})
+	}, 0)
+
+	env.OnActivity((*PathwayActivities).ExecuteResumeStep, mock.Anything, mock.Anything, mock.Anything).
+		Return(nil, fmt.Errorf("simulated resume failure"))
+
+	callbackCalled := false
+	env.OnActivity("HandleComplete", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in CompletionCallbackInput) error {
+			callbackCalled = true
+			require.NotEmpty(t, in.Err)
+			return nil
+		})
+
+	env.ExecuteWorkflow(PathwayWorkflow, PathwayInput{
+		PathwayJSON:            []byte(checkpointPathwayJSON),
+		Task:                   "test",
+		CompletionTaskQueue:    "my-queue",
+		CompletionActivityName: "HandleComplete",
+		CompletionData:         "run-err",
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.Error(t, env.GetWorkflowError())
+	require.True(t, callbackCalled, "completion callback should be called with error details")
 }

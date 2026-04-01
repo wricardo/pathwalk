@@ -8,10 +8,10 @@ import (
 
 // State holds the mutable runtime state of a pathway execution.
 type State struct {
-	Task        string
-	Variables   map[string]any
-	Steps       []Step
-	VisitCounts map[string]int // nodeID → number of times visited this run
+	Task        string         `json:"task"`
+	Variables   map[string]any `json:"variables"`
+	Steps       []Step         `json:"steps"`
+	VisitCounts map[string]int `json:"visit_counts"`
 }
 
 func newState(task string) *State {

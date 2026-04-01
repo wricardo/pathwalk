@@ -52,6 +52,70 @@ type PathwayActivities struct {
 	LLMClientOverride pathwalk.LLMClient
 }
 
+// ResumeStepActivityInput is the input to the ExecuteResumeStep activity.
+type ResumeStepActivityInput struct {
+	PathwayJSON  []byte
+	State        *pathwalk.State
+	ResumeNodeID string        // WaitCondition.NodeID from the suspended step
+	Signal       ResumeSignal  // the human response
+	LLMModel     string
+	LLMBaseURL   string
+	LLMAPIKey    string
+	Verbose      bool
+}
+
+// ResumeStepActivityResult is the output of the ExecuteResumeStep activity.
+type ResumeStepActivityResult struct {
+	State      *pathwalk.State
+	StepResult *pathwalk.StepResult
+}
+
+// ExecuteResumeStep is a Temporal activity that calls engine.ResumeStep() to unblock
+// a checkpoint and route to the next node.
+func (a *PathwayActivities) ExecuteResumeStep(ctx context.Context, input ResumeStepActivityInput) (*ResumeStepActivityResult, error) {
+	activity.RecordHeartbeat(ctx, "resume="+input.ResumeNodeID)
+
+	pathway, err := cachedParsePathway(input.PathwayJSON)
+	if err != nil {
+		return nil, fmt.Errorf("ParsePathway: %w", err)
+	}
+
+	var llmClient pathwalk.LLMClient
+	if a.LLMClientOverride != nil {
+		llmClient = a.LLMClientOverride
+	} else if len(pathway.Providers) == 0 {
+		// No pathway-level providers — use credentials from the activity input.
+		llmClient = pathwalk.NewOpenAIClient(input.LLMAPIKey, input.LLMBaseURL, input.LLMModel)
+	}
+	// else: pathway has providers; pass nil — NewEngine auto-builds a RoutingClient.
+
+	opts := []pathwalk.EngineOption{}
+	if pathway.GraphQLEndpoint != "" {
+		gt := &tools.GraphQLTool{Endpoint: pathway.GraphQLEndpoint, Headers: pathway.GraphQLHeaders}
+		opts = append(opts, pathwalk.WithTools(gt.AsTools()...))
+	}
+	for name, ep := range pathway.GraphQLEndpoints {
+		gt := &tools.GraphQLTool{Endpoint: ep, Name: name, Headers: pathway.GraphQLEndpointHeaders[name]}
+		opts = append(opts, pathwalk.WithTools(gt.AsTools()...))
+	}
+
+	engine := pathwalk.NewEngine(pathway, llmClient, opts...)
+
+	response := pathwalk.CheckpointResponse{
+		Value: input.Signal.Value,
+		Vars:  input.Signal.Vars,
+	}
+	stepResult, err := engine.ResumeStep(ctx, input.State, input.ResumeNodeID, response)
+	if err != nil {
+		return nil, fmt.Errorf("engine.ResumeStep: %w", err)
+	}
+
+	return &ResumeStepActivityResult{
+		State:      input.State,
+		StepResult: stepResult,
+	}, nil
+}
+
 // ExecuteStep is a Temporal activity that executes a single node step.
 // It parses the pathway, creates an engine, and calls engine.Step().
 func (a *PathwayActivities) ExecuteStep(ctx context.Context, input StepActivityInput) (*StepActivityResult, error) {
@@ -70,16 +134,22 @@ func (a *PathwayActivities) ExecuteStep(ctx context.Context, input StepActivityI
 	var llmClient pathwalk.LLMClient
 	if a.LLMClientOverride != nil {
 		llmClient = a.LLMClientOverride
-	} else {
+	} else if len(pathway.Providers) == 0 {
+		// No pathway-level providers — use credentials from the activity input.
 		llmClient = pathwalk.NewOpenAIClient(input.LLMAPIKey, input.LLMBaseURL, input.LLMModel)
 	}
+	// else: pathway has providers; pass nil — NewEngine auto-builds a RoutingClient.
 
 	// Create engine options.
 	opts := []pathwalk.EngineOption{}
 
 	// Inject GraphQL tools if endpoint is configured in pathway.
 	if pathway.GraphQLEndpoint != "" {
-		gt := &tools.GraphQLTool{Endpoint: pathway.GraphQLEndpoint}
+		gt := &tools.GraphQLTool{Endpoint: pathway.GraphQLEndpoint, Headers: pathway.GraphQLHeaders}
+		opts = append(opts, pathwalk.WithTools(gt.AsTools()...))
+	}
+	for name, ep := range pathway.GraphQLEndpoints {
+		gt := &tools.GraphQLTool{Endpoint: ep, Name: name, Headers: pathway.GraphQLEndpointHeaders[name]}
 		opts = append(opts, pathwalk.WithTools(gt.AsTools()...))
 	}
 

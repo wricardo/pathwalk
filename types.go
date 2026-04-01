@@ -12,7 +12,10 @@
 //	result, err := engine.Run(ctx, "your task description")
 package pathwalk
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // NodeType identifies the kind of node in a pathway.
 type NodeType string
@@ -29,14 +32,102 @@ const (
 	// NodeTypeRoute evaluates conditions against the current state variables to
 	// pick the next node without calling the LLM.
 	NodeTypeRoute NodeType = "route"
+	// NodeTypeCheckpoint suspends or evaluates a gate condition.
+	// See CheckpointMode for the four supported modes.
+	NodeTypeCheckpoint NodeType = "checkpoint"
+	// NodeTypeAgent spawns a single child agent run and suspends until it completes.
+	NodeTypeAgent NodeType = "agent"
+	// NodeTypeTeam spawns multiple child agent runs with a coordination strategy
+	// (parallel, race, sequence) and suspends until they complete.
+	NodeTypeTeam NodeType = "team"
 )
 
-// VariableDef describes a variable to extract from LLM output.
+// CheckpointMode determines how a Checkpoint node behaves.
+type CheckpointMode string
+
+const (
+	// CheckpointModeHumanInput suspends execution and waits for freeform human input.
+	CheckpointModeHumanInput CheckpointMode = "human_input"
+	// CheckpointModeHumanApproval suspends execution and waits for human approve/reject.
+	CheckpointModeHumanApproval CheckpointMode = "human_approval"
+	// CheckpointModeLLMEval calls the LLM to evaluate pass/fail against criteria (synchronous).
+	CheckpointModeLLMEval CheckpointMode = "llm_eval"
+	// CheckpointModeAuto evaluates deterministic conditions against state variables (synchronous).
+	CheckpointModeAuto CheckpointMode = "auto"
+	// CheckpointModeWait suspends execution for a duration or until an external event.
+	// The caller handles the actual sleeping/waiting and calls ResumeStep when ready.
+	CheckpointModeWait CheckpointMode = "wait"
+	// CheckpointModeAgent indicates suspension for a child agent run.
+	CheckpointModeAgent CheckpointMode = "agent"
+	// CheckpointModeTeam indicates suspension for parallel/race/sequence child agent runs.
+	CheckpointModeTeam CheckpointMode = "team"
+)
+
+// WaitCondition describes what a checkpoint node is waiting for.
+// Returned on StepResult when a checkpoint suspends execution.
+type WaitCondition struct {
+	Mode         CheckpointMode   `json:"mode"`
+	NodeID       string           `json:"node_id"`
+	NodeName     string           `json:"node_name"`
+	Prompt       string           `json:"prompt"`
+	Criteria     string           `json:"criteria,omitempty"`
+	Conditions   []RouteCondition `json:"conditions,omitempty"`
+	Options      []string         `json:"options,omitempty"`
+	VariableName string           `json:"variable_name"`
+	// Variables defines structured fields to collect from the human.
+	// When present, the UI should render a form with typed inputs instead of
+	// a single freeform text field. Each variable becomes a form field.
+	// Supported types: "string", "integer", "boolean", "datetime".
+	Variables []VariableDef `json:"variables,omitempty"`
+	// WaitDuration is a Go duration string (e.g. "24h", "5m", "168h") for wait mode.
+	// When set, the caller should sleep for this duration before resuming.
+	// When empty in wait mode, the caller waits for an external event/signal.
+	WaitDuration string `json:"wait_duration,omitempty"`
+	// AgentTask describes a single child agent to spawn (mode=agent).
+	AgentTask *AgentTask `json:"agent_task,omitempty"`
+	// TeamTasks describes multiple child agents to spawn (mode=team).
+	TeamTasks []AgentTask `json:"team_tasks,omitempty"`
+	// TeamStrategy is the coordination strategy for team mode: "parallel", "race", "sequence".
+	TeamStrategy string `json:"team_strategy,omitempty"`
+}
+
+// AgentTaskDef is a declarative agent definition in the pathway JSON (before template resolution).
+type AgentTaskDef struct {
+	Name      string `json:"name"`
+	AgentID   string `json:"agentId"`
+	Task      string `json:"task"`
+	OutputVar string `json:"outputVar"`
+}
+
+// AgentTask describes a child agent run to spawn (with resolved templates).
+type AgentTask struct {
+	Name      string `json:"name"`
+	AgentID   string `json:"agent_id"`
+	Task      string `json:"task"`       // resolved task template
+	OutputVar string `json:"output_var"` // variable name in parent state for this agent's output
+}
+
+// CheckpointResponse carries the external input that resumes a suspended checkpoint.
+type CheckpointResponse struct {
+	Value     string         `json:"value"`
+	Vars      map[string]any `json:"vars,omitempty"`
+	// ChildRuns captures execution traces from child agents (Agent/Team nodes).
+	// The caller populates this so the parent's step log includes full child traces.
+	ChildRuns []ChildRun `json:"child_runs,omitempty"`
+}
+
+// VariableDef describes a variable to extract from LLM output or collect from human input.
 type VariableDef struct {
-	Name        string
-	Type        string // "string", "integer", "boolean"
-	Description string
-	Required    bool
+	Name        string `json:"name"`
+	Type        string `json:"type"` // "string", "integer", "boolean", "datetime"
+	Description string `json:"description"`
+	Required    bool   `json:"required"`
+	// JQ is an optional jq expression for deterministic extraction from
+	// structured (JSON) responses. When set, the engine uses gojq instead
+	// of calling the LLM, saving a round trip. The expression receives the
+	// full response and should return a single value.
+	// Example: ".data.createOrder.id"
+	JQ string `json:"jq,omitempty"`
 }
 
 // Edge represents a directed connection between two nodes.
@@ -76,6 +167,8 @@ type Node struct {
 	Condition   string
 	ExtractVars []VariableDef
 	Temperature float64
+	Model       string // overrides the provider's default model for this node
+	LLMProvider string // explicit provider name; empty = auto-route by model name
 
 	// Terminal node
 	TerminalText string
@@ -96,6 +189,25 @@ type Node struct {
 	// MaxVisits caps how many times this node may be visited in a single run.
 	// 0 means use the pathway-level MaxVisitsPerNode default (or no limit).
 	MaxVisits int
+
+	// Checkpoint node
+	CheckpointMode       CheckpointMode
+	CheckpointPrompt     string
+	CheckpointCriteria   string
+	CheckpointVariable   string
+	CheckpointConditions []RouteCondition
+	CheckpointOptions    []string
+	// WaitDuration is a Go duration string for wait mode (e.g. "24h", "5m").
+	WaitDuration string
+
+	// Agent node
+	AgentID        string // ID of the child agent to spawn (references an Agent record)
+	AgentTask      string // task template with {{variable}} placeholders
+	AgentOutputVar string // variable name for the child agent's output
+
+	// Team node
+	TeamStrategy string           // "parallel", "race", "sequence"
+	TeamAgents   []AgentTaskDef   // child agents to spawn
 }
 
 // Message is a single turn in an LLM conversation.
@@ -190,6 +302,24 @@ type Step struct {
 	// chose the next node (e.g. "single edge", "selected route 2").
 	RouteReason string
 	NextNode    string
+	// ResumeValue records the value submitted to resume a checkpoint/agent/team.
+	// Empty for non-resumable nodes.
+	ResumeValue string
+	// ChildRuns captures execution traces from child agent runs (Agent/Team nodes).
+	ChildRuns []ChildRun
+
+	// Observability fields — populated by the engine after each step.
+	StartedAt     time.Time      `json:"started_at,omitempty"`
+	DurationMs    int            `json:"duration_ms,omitempty"`
+	StateSnapshot map[string]any `json:"state_snapshot,omitempty"`
+}
+
+// ChildRun captures the execution trace of a child agent run.
+type ChildRun struct {
+	Name    string `json:"name"`     // child agent name
+	AgentID string `json:"agent_id"` // child agent ID
+	Output  string `json:"output"`   // final output
+	Steps   []Step `json:"steps"`    // full execution trace
 }
 
 // RunResult is the final result of running a pathway.

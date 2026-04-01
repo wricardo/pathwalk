@@ -31,6 +31,23 @@
         "format": "uri"
       }
     },
+    "graphqlHeaders": {
+      "type": "object",
+      "description": "HTTP headers sent with every request to the default graphqlEndpoint. Use {{PLACEHOLDER}} values to inject secrets at runtime via runAgent vars.",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "graphqlEndpointHeaders": {
+      "type": "object",
+      "description": "Per-named-endpoint HTTP headers. Keys match names in graphqlEndpoints. Use {{PLACEHOLDER}} values to inject secrets at runtime via runAgent vars.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        }
+      }
+    },
     "maxTurns": {
       "type": "integer",
       "description": "Maximum number of node-to-node transitions. 0 means use the engine default (50).",
@@ -40,6 +57,11 @@
       "type": "integer",
       "description": "Default per-node visit cap applied to all nodes. 0 means no limit.",
       "minimum": 0
+    },
+    "providers": {
+      "type": "array",
+      "description": "LLM provider configurations. When present, the engine builds a RoutingClient from these providers instead of using a globally-configured client. API keys and base URLs support ${ENV_VAR} substitution.",
+      "items": { "$ref": "#/definitions/providerConfig" }
     },
     "schedule": {
       "type": "object",
@@ -140,9 +162,17 @@
           "properties": {
             "newTemperature": {
               "type": "number",
-              "description": "LLM temperature for this node.",
+              "description": "LLM temperature for this node. 0 uses the provider default.",
               "minimum": 0,
               "maximum": 2
+            },
+            "model": {
+              "type": "string",
+              "description": "Model name for this node (e.g. 'gpt-4o-mini', 'claude-sonnet-4-6'). Overrides the provider's defaultModel. Used for auto-routing when no provider is specified."
+            },
+            "provider": {
+              "type": "string",
+              "description": "Explicit provider name (references providers[].name). When set, this node always uses that provider regardless of the model name."
             }
           }
         },
@@ -358,6 +388,43 @@
         "value": {
           "type": "string",
           "description": "Value to compare the field against."
+        }
+      }
+    },
+    "providerConfig": {
+      "type": "object",
+      "description": "Configuration for a single LLM provider.",
+      "required": ["name", "models"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Unique provider name referenced by modelOptions.provider (e.g. 'venu', 'openai', 'anthropic').",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "description": "Provider API type. Both use the OpenAI-compatible API format.",
+          "enum": ["openai", "anthropic"]
+        },
+        "baseURL": {
+          "type": "string",
+          "description": "Custom API endpoint. Supports ${ENV_VAR} substitution. Empty uses the SDK default."
+        },
+        "apiKey": {
+          "type": "string",
+          "description": "API authentication key. Supports ${ENV_VAR} substitution (e.g. '${OPENAI_API_KEY}')."
+        },
+        "defaultModel": {
+          "type": "string",
+          "description": "Default model used when a node does not specify modelOptions.model."
+        },
+        "models": {
+          "type": "array",
+          "description": "Model names or prefixes this provider handles for auto-routing. Use '*' for catch-all fallback. Prefix matching: 'claude-' matches any model starting with 'claude-'.",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 },
+          "examples": [["*"], ["gpt-4o", "gpt-4o-mini"], ["claude-"], ["o1-", "o3-"]]
         }
       }
     },

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
@@ -24,13 +26,112 @@ type LLMClient interface {
 // CompletionRequest is the input to LLMClient.Complete.
 type CompletionRequest struct {
 	Model       string
+	Provider    string // optional: explicit provider name (references ProviderConfig.Name)
 	Messages    []Message
 	Tools       []Tool
 	Temperature float64
 	MaxTokens   int
 }
 
+// ProviderConfig defines an LLM provider with its credentials and model routing rules.
+type ProviderConfig struct {
+	Name         string   `json:"name"`
+	Type         string   `json:"type"`         // "openai" or "anthropic" (both use OpenAI-compatible API)
+	BaseURL      string   `json:"baseURL"`      // custom endpoint; empty = SDK default. Supports ${ENV_VAR}.
+	APIKey       string   `json:"apiKey"`       // supports ${ENV_VAR}
+	DefaultModel string   `json:"defaultModel"` // used when a node doesn't specify a model
+	// Models lists which model names this provider handles for auto-routing.
+	// Exact match, or prefix match if ending with "-" (e.g. "claude-" matches "claude-3-5-sonnet-*").
+	// Use "*" to mark this provider as the catch-all fallback.
+	Models       []string `json:"models"`
+}
+
+// RoutingClient dispatches LLM calls to the right provider based on the
+// model name or an explicit provider name in CompletionRequest.
+type RoutingClient struct {
+	byName   map[string]LLMClient
+	routes   []modelRoute
+	fallback LLMClient
+}
+
+type modelRoute struct {
+	patterns []string
+	client   LLMClient
+}
+
+// NewRoutingClient builds a RoutingClient from a list of provider configs.
+// API keys and base URLs support ${ENV_VAR} substitution via os.ExpandEnv.
+func NewRoutingClient(providers []ProviderConfig) *RoutingClient {
+	rc := &RoutingClient{
+		byName: make(map[string]LLMClient),
+	}
+	for _, p := range providers {
+		apiKey := os.ExpandEnv(p.APIKey)
+		baseURL := os.ExpandEnv(p.BaseURL)
+		defaultModel := os.ExpandEnv(p.DefaultModel)
+		client := NewOpenAIClient(apiKey, baseURL, defaultModel)
+		rc.byName[p.Name] = client
+
+		catchAll := false
+		for _, m := range p.Models {
+			if m == "*" {
+				catchAll = true
+				break
+			}
+		}
+		if catchAll {
+			rc.fallback = client
+		} else if len(p.Models) > 0 {
+			rc.routes = append(rc.routes, modelRoute{
+				patterns: p.Models,
+				client:   client,
+			})
+		}
+	}
+	return rc
+}
+
+// Complete routes the request to the appropriate provider and calls its Complete.
+func (rc *RoutingClient) Complete(ctx context.Context, req CompletionRequest) (*CompletionResponse, error) {
+	client := rc.resolve(req.Provider, req.Model)
+	if client == nil {
+		return nil, fmt.Errorf("no LLM provider matched model=%q provider=%q; check pathway providers config", req.Model, req.Provider)
+	}
+	return client.Complete(ctx, req)
+}
+
+func (rc *RoutingClient) resolve(providerName, model string) LLMClient {
+	// 1. Explicit provider name.
+	if providerName != "" {
+		if c, ok := rc.byName[providerName]; ok {
+			return c
+		}
+	}
+	// 2. Model-based routing: exact match or prefix (e.g. "claude-").
+	if model != "" {
+		for _, route := range rc.routes {
+			for _, pattern := range route.patterns {
+				if strings.HasSuffix(pattern, "-") {
+					if strings.HasPrefix(model, pattern) {
+						return route.client
+					}
+				} else if pattern == model {
+					return route.client
+				}
+			}
+		}
+	}
+	// 3. Catch-all fallback.
+	return rc.fallback
+}
+
 // CompletionResponse is the output from LLMClient.Complete.
+//
+// When Complete returns both a non-nil response and a non-nil error (e.g. the
+// tool-call round limit was exceeded), ToolCalls contains the tool calls the
+// LLM emitted before the error occurred. These calls were NOT executed — they
+// are recorded so callers can surface what was attempted. Content will be
+// empty in this partial-error case.
 type CompletionResponse struct {
 	Content   string
 	ToolCalls []ToolCall
@@ -207,5 +308,7 @@ func (c *OpenAIClient) Complete(ctx context.Context, req CompletionRequest) (*Co
 		}
 	}
 
-	return nil, fmt.Errorf("exceeded maximum tool call rounds (%d)", maxToolRounds)
+	return &CompletionResponse{
+		ToolCalls: allToolCalls,
+	}, fmt.Errorf("exceeded maximum tool call rounds (%d)", maxToolRounds)
 }

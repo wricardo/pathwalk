@@ -38,6 +38,12 @@ This is a Go library (package `pathwalk`) that executes conversational pathway J
 - `NodeTypeRoute` node: pure-Go condition evaluation against `state.Variables` (no LLM call)
 - `NodeTypeTerminal` node: returns `TerminalText` as final output — terminates the run
 - `NodeTypeWebhook` node: HTTP call with `{{variable}}` template substitution in body
+- `NodeTypeCheckpoint` node: suspends or evaluates a gate. Four modes:
+  - `human_input` / `human_approval`: suspends — `Step()` returns `WaitCondition`, caller collects input, calls `ResumeStep()`
+  - `llm_eval`: LLM evaluates pass/fail against criteria (synchronous, no suspend)
+  - `auto`: deterministic condition check, writes pass/fail to a variable (synchronous, no suspend)
+- `NodeTypeAgent` node: spawns a single child agent run. Suspends with `WaitCondition{Mode: "agent", AgentTask: ...}`. Caller runs the child, calls `ResumeStep` with output in `Vars`.
+- `NodeTypeTeam` node: spawns multiple child agents with a strategy. Suspends with `WaitCondition{Mode: "team", TeamTasks: [...], TeamStrategy: "parallel"|"race"|"sequence"}`. Caller runs children per strategy, calls `ResumeStep` with all outputs in `Vars`.
 
 **Routing (`router.go`):**
 - Single outgoing edge → follow it automatically
@@ -46,8 +52,59 @@ This is a Go library (package `pathwalk`) that executes conversational pathway J
 
 **LLM interface (`llm.go`):**
 - `LLMClient` interface with `Complete(ctx, CompletionRequest) (*CompletionResponse, error)`
-- `OpenAIClient` handles the tool-call loop internally (up to 10 rounds)
+- `OpenAIClient` handles the tool-call loop internally (up to 25 rounds)
 - Compatible with any OpenAI-compatible API via `--base-url`
+- `RoutingClient` dispatches to one of several named `OpenAIClient` instances based on model name or explicit provider — built automatically from `pathway.Providers` when declared
+
+**Pathway-level provider config (`providers` top-level key):**
+
+Declare providers in the pathway JSON to configure which LLM backend each node uses. When `providers` is present, `NewEngine` accepts `nil` as the `LLMClient` and auto-builds a `RoutingClient`:
+
+```json
+{
+  "providers": [
+    {
+      "name": "venu",
+      "type": "openai",
+      "baseURL": "${LLM_BASE_URL}",
+      "apiKey": "${OPENAI_API_KEY}",
+      "models": ["*"]
+    },
+    {
+      "name": "smart",
+      "type": "openai",
+      "apiKey": "${OPENAI_API_KEY}",
+      "defaultModel": "gpt-4o",
+      "models": ["gpt-4o", "o1-"]
+    },
+    {
+      "name": "anthropic",
+      "type": "anthropic",
+      "apiKey": "${ANTHROPIC_API_KEY}",
+      "models": ["claude-"]
+    }
+  ]
+}
+```
+
+- `apiKey` and `baseURL` support `${ENV_VAR}` substitution via `os.ExpandEnv`
+- `models`: exact name, prefix ending in `-` (e.g. `"claude-"` matches any claude model), or `"*"` catch-all
+- Routing priority: explicit `modelOptions.provider` → model prefix match → `"*"` catch-all
+- Pathways without `providers` continue using the caller-supplied `LLMClient`
+
+**Per-node LLM config (`node.data.modelOptions`):**
+
+```json
+"modelOptions": {
+  "newTemperature": 0.2,
+  "model": "gpt-4o-mini",
+  "provider": "smart"
+}
+```
+
+- `model`: overrides the provider's `defaultModel` for this node; also used for auto-routing
+- `provider`: explicit provider name; skips model-based routing
+- `newTemperature`: applied only to the main `execute` call (not `extract_vars`, `route`, or `checkpoint_eval`)
 
 **Context keys for mock control:**
 - `NodeIDContextKey` (`"nodeID"`) — which node is calling the LLM
@@ -94,22 +151,33 @@ engine := pathwalk.NewEngine(pathway, llm, pathwalk.WithLogger(customLog))
 
 During `Step()` execution, logs are captured per-step in `StepResult.Logs`.
 
-**`RunResult.Reason` values:** `"terminal"`, `"max_steps"`, `"error"`, `"dead_end"`, `"missing_node"`, `"max_node_visits"`
+**`RunResult.Reason` values:** `"terminal"`, `"max_steps"`, `"error"`, `"dead_end"`, `"missing_node"`, `"max_node_visits"`, `"checkpoint"`
 
 **`StepResult` (returned by `engine.Step()`):**
 - `Step`: The step record (node executed, output, variables extracted)
 - `NextNodeID`: Node to execute next (empty when `Done==true`)
 - `Done`: True when run should terminate
-- `Reason`: Why termination occurred — `"terminal"`, `"dead_end"`, `"error"`, `"missing_node"`, `"max_node_visits"`
+- `Reason`: Why termination occurred — `"terminal"`, `"dead_end"`, `"error"`, `"missing_node"`, `"max_node_visits"`, `"checkpoint"`
 - `Output`: Text output from the node
 - `Error`: Error message if applicable
 - `Logs`: Log records captured during this step
+- `WaitCondition`: Non-nil when a checkpoint suspends execution (human_input/human_approval modes)
+
+**`engine.ResumeStep(ctx, state, nodeID, CheckpointResponse)`** resumes after a checkpoint.
+Pass the `WaitCondition.NodeID` and a `CheckpointResponse{Value, Vars, ChildRuns}`. Returns a `*StepResult`
+with `NextNodeID` set for continued stepping. Works for Checkpoint, Agent, and Team nodes.
+
+**Step logging:** Every step records `ResumeValue` (what was submitted) and `ChildRuns` (child agent
+execution traces). Suspend steps include descriptive `Output` (e.g. `[human_approval] prompt text`,
+`[agent] Spawning child "name"`, `[team:parallel] Spawning N agents`). `ChildRun{Name, AgentID, Output, Steps}`
+captures the full trace of each child agent.
 
 ## Pathway JSON format
 
 Pathways are JSON files with `nodes` and `edges` arrays. The parser maps raw JSON type strings
 to normalized NodeType constants: `"Default"` → `NodeTypeLLM`, `"End Call"` → `NodeTypeTerminal`,
-`"Webhook"` → `NodeTypeWebhook`, `"Route"` → `NodeTypeRoute`.
+`"Webhook"` → `NodeTypeWebhook`, `"Route"` → `NodeTypeRoute`, `"Checkpoint"` → `NodeTypeCheckpoint`,
+`"Agent"` → `NodeTypeAgent`, `"Team"` → `NodeTypeTeam`.
 
 Key `node.data` fields:
 - `isStart: true` — marks the entry node
@@ -117,8 +185,25 @@ Key `node.data` fields:
 - `routes: [{conditions: [{field, operator, value}], targetNodeId}]` — Route node rules
 - `condition` — exit condition hint passed to the LLM for routing decisions
 - `modelOptions.newTemperature` — per-node LLM temperature
+- `modelOptions.model` — per-node model override (e.g. `"gpt-4o-mini"`, `"claude-sonnet-4-6"`); used for provider auto-routing
+- `modelOptions.provider` — explicit provider name (references `providers[].name`); bypasses model-based routing
+- `checkpointMode` — Checkpoint mode: `"human_input"`, `"human_approval"`, `"llm_eval"`, `"auto"`, `"wait"`
+- `checkpointPrompt` — text shown to the human or used as LLM eval context
+- `checkpointVariable` — variable name to store the checkpoint response
+- `checkpointCriteria` — pass/fail criteria for `llm_eval` mode
+- `checkpointConditions` — deterministic conditions for `auto` mode (same format as route conditions)
+- `checkpointOptions` — custom options for `human_approval` (default: `["approve", "reject"]`)
+- `waitDuration` — Go duration string for `wait` mode (e.g. `"24h"`, `"5m"`). Empty = event-driven wait
+- `agentId` — Agent node: ID of the child agent to spawn
+- `task` — Agent node: task template with `{{variable}}` placeholders resolved from state
+- `outputVar` — Agent node: variable name for the child agent's output in parent state
+- `strategy` — Team node: `"parallel"`, `"race"`, or `"sequence"`
+- `agents` — Team node: array of `{name, agentId, task, outputVar}` child agent definitions
 
-`extractVars` tuple format: `[name(string), type("string"|"integer"|"boolean"), description(string), required(bool)]`
+`extractVars` tuple format: `[name(string), type("string"|"integer"|"boolean"|"datetime"), description(string), required(bool)]`
+
+When `extractVars` is present on a `human_input` checkpoint, the UI renders a typed form instead of
+freeform text. Each variable becomes a form field with the appropriate input type.
 
 Route condition operators: `"is"`, `"is not"`, `"contains"`, `"not contains"`, `">"`, `"<"`, `">="`, `"<="`
 

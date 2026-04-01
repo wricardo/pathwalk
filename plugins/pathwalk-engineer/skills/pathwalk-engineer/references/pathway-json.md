@@ -46,6 +46,9 @@ A pathway is a JSON object with `nodes` and `edges` arrays.
 | `"End Call"` | `NodeTypeTerminal` |
 | `"Webhook"` | `NodeTypeWebhook` |
 | `"Route"` | `NodeTypeRoute` |
+| `"Checkpoint"` | `NodeTypeCheckpoint` |
+| `"Agent"` | `NodeTypeAgent` |
+| `"Team"` | `NodeTypeTeam` |
 
 For `"End Call"` nodes, `data.text` is the terminal text returned as the final output.
 
@@ -67,20 +70,24 @@ Both `source` and `target` must reference existing node IDs — the parser valid
 
 ## extractVars
 
-Tells the engine to make a second LLM call after `execute` to extract structured data into state variables.
+Tells the engine to extract structured data into state variables. By default, a second LLM call is made after `execute`. When a `jq` expression is provided (5th element), extraction is deterministic — no LLM call needed.
 
 ```json
 "extractVars": [
   ["variable_name", "string",  "Description for the LLM", true],
   ["count",         "integer", "How many items",           false],
-  ["confirmed",     "boolean", "User confirmed?",          false]
+  ["confirmed",     "boolean", "User confirmed?",          false],
+  ["order_id",      "string",  "The created order ID",     true, ".data.createOrder.id"]
 ]
 ```
 
-Tuple format: `[name, type, description, required]`
+Tuple format: `[name, type, description, required, jq]`
 - `type` must be `"string"`, `"integer"`, or `"boolean"`
 - `required` is optional (defaults to false)
+- `jq` is optional — a jq expression to extract the value from the response (no LLM call)
 - Tuples with fewer than 3 elements cause a parse error
+
+When `jq` is set, the engine applies it via gojq on the response text/JSON. If jq extraction fails, it falls back to LLM extraction. Variables without jq use LLM extraction as before.
 
 Extracted variables are merged into `state.Variables` and available in all subsequent nodes as `{{variable_name}}` in templates.
 
@@ -194,6 +201,140 @@ Declarative tools scoped to a single node. Only visible to the LLM when executin
   - `"default"` — always matches (use as fallback)
   - `"BlandStatusCode"` — matches on HTTP status code using operator/value
   - When a pathway with a non-empty `nodeId` matches, it overrides normal edge routing via `$tool_route` state variable
+
+## Checkpoint Node
+
+Suspends execution for external input or evaluates a gate condition.
+
+```json
+{
+  "id": "approval-gate",
+  "type": "Checkpoint",
+  "data": {
+    "name": "Approval Gate",
+    "checkpointMode": "human_approval",
+    "checkpointPrompt": "Do you approve this action?",
+    "checkpointVariable": "approval_status",
+    "checkpointOptions": ["approve", "reject"]
+  }
+}
+```
+
+### Checkpoint Modes
+
+| Mode | Suspends? | Behavior |
+|------|-----------|----------|
+| `human_input` | Yes | Waits for freeform text input. With `extractVars`, renders a typed form. |
+| `human_approval` | Yes | Waits for one of the defined options (default: approve/reject) |
+| `llm_eval` | No | LLM evaluates pass/fail against `checkpointCriteria` |
+| `auto` | No | Deterministic condition check using `checkpointConditions` |
+| `wait` | Yes | Suspends for a duration or external event. Caller handles sleeping/signaling. |
+
+### Checkpoint Fields
+
+- `checkpointMode` (required) — one of the five modes above
+- `checkpointPrompt` — text shown to the human or used as LLM eval context
+- `checkpointVariable` — variable name to store the response (`"pass"`/`"fail"` for auto/llm_eval, user input for human modes)
+- `checkpointCriteria` — pass/fail criteria text (llm_eval only)
+- `checkpointConditions` — array of condition objects, same format as route conditions (auto only)
+- `checkpointOptions` — custom options array for human_approval (default: `["approve", "reject"]`)
+- `waitDuration` — Go duration string for wait mode (e.g. `"24h"`, `"5m"`). Empty = event-driven wait.
+- `extractVars` — on `human_input` checkpoints, defines typed form fields instead of freeform text
+
+After a checkpoint, the stored variable is available for downstream Route nodes to branch on.
+
+### Structured Form Collection
+
+When a `human_input` checkpoint has `extractVars`, the UI renders a typed form:
+
+```json
+{
+  "type": "Checkpoint",
+  "data": {
+    "checkpointMode": "human_input",
+    "checkpointPrompt": "Schedule the callback:",
+    "extractVars": [
+      ["customer_name", "string", "Customer name", true],
+      ["callback_time", "datetime", "Callback date/time", true],
+      ["item_count", "integer", "Number of items", false],
+      ["is_urgent", "boolean", "Urgent?", false]
+    ]
+  }
+}
+```
+
+Supported types: `"string"`, `"integer"`, `"boolean"`, `"datetime"`. The response comes back in `CheckpointResponse.Vars` with each variable as a key.
+
+### Wait Mode
+
+Suspends execution for a duration or until an external event:
+
+```json
+{
+  "type": "Checkpoint",
+  "data": {
+    "checkpointMode": "wait",
+    "checkpointPrompt": "Waiting 24 hours before follow-up.",
+    "checkpointVariable": "wait_result",
+    "waitDuration": "24h"
+  }
+}
+```
+
+- With `waitDuration`: caller sleeps, then resumes with `value: "timer_expired"`
+- Without `waitDuration`: caller waits for an external signal (webhook, event), then resumes with the event payload
+
+## Agent Node
+
+Spawns a single child agent run and suspends until it completes.
+
+```json
+{
+  "id": "research",
+  "type": "Agent",
+  "data": {
+    "name": "Research Agent",
+    "agentId": "agent-researcher-123",
+    "task": "Research {{topic}} and summarize.",
+    "outputVar": "research_summary"
+  }
+}
+```
+
+- `agentId`: ID of the child agent (an Agent record in the DB with its own pathway + tools)
+- `task`: task template — `{{variable}}` placeholders are resolved from parent state
+- `outputVar`: variable name where the child's output is stored in parent state
+
+The engine suspends with `WaitCondition{Mode: "agent", AgentTask: {...}}`. The caller spawns the child, collects the result, and calls `ResumeStep` with the output in `CheckpointResponse.Vars`.
+
+## Team Node
+
+Spawns multiple child agent runs with a coordination strategy.
+
+```json
+{
+  "id": "review-team",
+  "type": "Team",
+  "data": {
+    "name": "Review Team",
+    "strategy": "parallel",
+    "agents": [
+      {"name": "Bugs", "agentId": "agent-bugs", "task": "Find bugs in {{code}}", "outputVar": "bug_report"},
+      {"name": "Security", "agentId": "agent-sec", "task": "Security review: {{code}}", "outputVar": "sec_report"}
+    ]
+  }
+}
+```
+
+### Team strategies
+
+| Strategy | Behavior |
+|----------|----------|
+| `parallel` | Spawn all, wait for all, merge all outputs |
+| `race` | Spawn all, use first to complete, cancel rest |
+| `sequence` | Run in order, each gets prior agent outputs |
+
+The engine suspends with `WaitCondition{Mode: "team", TeamTasks: [...], TeamStrategy: "..."}`. The caller handles coordination and calls `ResumeStep` with all outputs in `Vars`.
 
 ## Global Nodes
 

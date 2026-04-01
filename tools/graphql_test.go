@@ -157,15 +157,17 @@ func TestExecute_NetworkError(t *testing.T) {
 
 // ── AsTools and toolName tests ─────────────────────────────────────────────
 
-func TestAsTools_ReturnsSixTools(t *testing.T) {
+func TestAsTools_ReturnsAllTools(t *testing.T) {
 	gt := &GraphQLTool{Endpoint: "http://localhost"}
 	tools := gt.AsTools()
-	if len(tools) != 6 {
-		t.Fatalf("expected 6 tools, got %d", len(tools))
+	if len(tools) != 8 {
+		t.Fatalf("expected 8 tools, got %d", len(tools))
 	}
 	expected := map[string]bool{
 		"graphql_query":     true,
 		"graphql_mutation":  true,
+		"graphql_batch":     true,
+		"graphql_explore":   true,
 		"graphql_queries":   true,
 		"graphql_mutations": true,
 		"graphql_types":     true,

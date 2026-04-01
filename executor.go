@@ -62,8 +62,9 @@ func executeLLM(ctx context.Context, node *Node, state *State, llm LLMClient, to
 	}
 
 	req := CompletionRequest{
-		Model:    "",
-		Messages: []Message{
+		Model:       node.Model,
+		Provider:    node.LLMProvider,
+		Messages:    []Message{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userMsg},
 		},
@@ -202,7 +203,7 @@ func extractVars(ctx context.Context, node *Node, text string, llm LLMClient, lo
 
 	// Second pass: extract remaining variables via LLM.
 	if len(llmVars) > 0 {
-		llmResult, err := extractVarsLLM(ctx, llmVars, text, llm, log)
+		llmResult, err := extractVarsLLM(ctx, llmVars, text, node.Model, node.LLMProvider, llm, log)
 		if err != nil {
 			return result, err
 		}
@@ -220,7 +221,7 @@ func extractVars(ctx context.Context, node *Node, text string, llm LLMClient, lo
 }
 
 // extractVarsLLM calls the LLM to extract variables that don't have JQ expressions.
-func extractVarsLLM(ctx context.Context, vars []VariableDef, text string, llm LLMClient, log *slog.Logger) (map[string]any, error) {
+func extractVarsLLM(ctx context.Context, vars []VariableDef, text, model, provider string, llm LLMClient, log *slog.Logger) (map[string]any, error) {
 	// Build the variable descriptions
 	var varDesc strings.Builder
 	for _, v := range vars {
@@ -269,6 +270,8 @@ func extractVarsLLM(ctx context.Context, vars []VariableDef, text string, llm LL
 	}
 
 	req := CompletionRequest{
+		Model:    model,
+		Provider: provider,
 		Messages: []Message{
 			{
 				Role:    "system",
@@ -693,6 +696,8 @@ func executeCheckpoint(ctx context.Context, node *Node, state *State, llm LLMCli
 		}
 
 		resp, err := llm.Complete(ctx, CompletionRequest{
+			Model:    node.Model,
+			Provider: node.LLMProvider,
 			Messages: []Message{
 				{Role: "system", Content: "You are evaluating a quality gate in an agentic workflow. Assess the current state against the criteria and call checkpoint_eval."},
 				{Role: "user", Content: evalPrompt},

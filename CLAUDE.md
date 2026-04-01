@@ -52,8 +52,59 @@ This is a Go library (package `pathwalk`) that executes conversational pathway J
 
 **LLM interface (`llm.go`):**
 - `LLMClient` interface with `Complete(ctx, CompletionRequest) (*CompletionResponse, error)`
-- `OpenAIClient` handles the tool-call loop internally (up to 10 rounds)
+- `OpenAIClient` handles the tool-call loop internally (up to 25 rounds)
 - Compatible with any OpenAI-compatible API via `--base-url`
+- `RoutingClient` dispatches to one of several named `OpenAIClient` instances based on model name or explicit provider — built automatically from `pathway.Providers` when declared
+
+**Pathway-level provider config (`providers` top-level key):**
+
+Declare providers in the pathway JSON to configure which LLM backend each node uses. When `providers` is present, `NewEngine` accepts `nil` as the `LLMClient` and auto-builds a `RoutingClient`:
+
+```json
+{
+  "providers": [
+    {
+      "name": "venu",
+      "type": "openai",
+      "baseURL": "${LLM_BASE_URL}",
+      "apiKey": "${OPENAI_API_KEY}",
+      "models": ["*"]
+    },
+    {
+      "name": "smart",
+      "type": "openai",
+      "apiKey": "${OPENAI_API_KEY}",
+      "defaultModel": "gpt-4o",
+      "models": ["gpt-4o", "o1-"]
+    },
+    {
+      "name": "anthropic",
+      "type": "anthropic",
+      "apiKey": "${ANTHROPIC_API_KEY}",
+      "models": ["claude-"]
+    }
+  ]
+}
+```
+
+- `apiKey` and `baseURL` support `${ENV_VAR}` substitution via `os.ExpandEnv`
+- `models`: exact name, prefix ending in `-` (e.g. `"claude-"` matches any claude model), or `"*"` catch-all
+- Routing priority: explicit `modelOptions.provider` → model prefix match → `"*"` catch-all
+- Pathways without `providers` continue using the caller-supplied `LLMClient`
+
+**Per-node LLM config (`node.data.modelOptions`):**
+
+```json
+"modelOptions": {
+  "newTemperature": 0.2,
+  "model": "gpt-4o-mini",
+  "provider": "smart"
+}
+```
+
+- `model`: overrides the provider's `defaultModel` for this node; also used for auto-routing
+- `provider`: explicit provider name; skips model-based routing
+- `newTemperature`: applied only to the main `execute` call (not `extract_vars`, `route`, or `checkpoint_eval`)
 
 **Context keys for mock control:**
 - `NodeIDContextKey` (`"nodeID"`) — which node is calling the LLM
@@ -134,6 +185,8 @@ Key `node.data` fields:
 - `routes: [{conditions: [{field, operator, value}], targetNodeId}]` — Route node rules
 - `condition` — exit condition hint passed to the LLM for routing decisions
 - `modelOptions.newTemperature` — per-node LLM temperature
+- `modelOptions.model` — per-node model override (e.g. `"gpt-4o-mini"`, `"claude-sonnet-4-6"`); used for provider auto-routing
+- `modelOptions.provider` — explicit provider name (references `providers[].name`); bypasses model-based routing
 - `checkpointMode` — Checkpoint mode: `"human_input"`, `"human_approval"`, `"llm_eval"`, `"auto"`, `"wait"`
 - `checkpointPrompt` — text shown to the human or used as LLM eval context
 - `checkpointVariable` — variable name to store the checkpoint response

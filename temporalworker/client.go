@@ -11,15 +11,22 @@ import (
 // RunOptions configures a pathway workflow run.
 type RunOptions struct {
 	WorkflowID string // Optional; if empty, Temporal generates a UUID
+	TaskQueue  string // Optional; if empty, defaults to TaskQueue ("pathwalk")
 }
 
 // StartRun kicks off a PathwayWorkflow and returns the workflow ID immediately.
 // The caller can later use GetResult or WaitForResult with the returned workflow ID.
 // Pass opts.WorkflowID for idempotency; if empty, Temporal generates a UUID.
+// Pass opts.TaskQueue to override the default task queue (useful when PathwayWorkflow
+// is registered on a non-pathwalk worker, e.g. jenny's "jenny" task queue).
 func StartRun(ctx context.Context, c client.Client, input PathwayInput, opts RunOptions) (string, error) {
+	tq := opts.TaskQueue
+	if tq == "" {
+		tq = TaskQueue
+	}
 	wopts := client.StartWorkflowOptions{
 		ID:        opts.WorkflowID,
-		TaskQueue: TaskQueue,
+		TaskQueue: tq,
 	}
 
 	exec, err := c.ExecuteWorkflow(ctx, wopts, PathwayWorkflow, input)
@@ -45,6 +52,15 @@ func GetResult(ctx context.Context, c client.Client, workflowID string) (*RunSna
 	}
 
 	return &snapshot, nil
+}
+
+// SendResumeSignal sends a ResumeSignal to a PathwayWorkflow blocked at a checkpoint.
+// workflowID must match the ID returned by StartRun.
+func SendResumeSignal(ctx context.Context, c client.Client, workflowID string, sig ResumeSignal) error {
+	if err := c.SignalWorkflow(ctx, workflowID, "", ResumeSignalName, sig); err != nil {
+		return fmt.Errorf("sending resume signal to workflow %q: %w", workflowID, err)
+	}
+	return nil
 }
 
 // WaitForResult blocks until the workflow finishes and returns the final RunResult.

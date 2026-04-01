@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 )
 
 const defaultMaxSteps = 50
@@ -30,6 +31,7 @@ type Engine struct {
 	maxSteps        int
 	globalNodeCheck bool
 	log             *slog.Logger
+	stepCallbacks   []func(*StepResult)
 }
 
 // EngineOption is a functional option for Engine.
@@ -65,14 +67,28 @@ func WithLogger(log *slog.Logger) EngineOption {
 	}
 }
 
+// WithStepCallback registers a callback invoked after each step completes in Run.
+// The callback receives the StepResult (including WaitCondition when a checkpoint
+// suspends). Multiple callbacks may be registered; they are called in order.
+// Useful for live progress updates, incremental persistence, or monitoring.
+func WithStepCallback(fn func(*StepResult)) EngineOption {
+	return func(e *Engine) {
+		e.stepCallbacks = append(e.stepCallbacks, fn)
+	}
+}
+
 // NewEngine creates an Engine for the given pathway and LLM client.
-// Panics if pathway or llm is nil.
+// Panics if pathway is nil. llm may be nil when the pathway declares providers;
+// in that case the engine automatically builds a RoutingClient from pathway.Providers.
 func NewEngine(pathway *Pathway, llm LLMClient, opts ...EngineOption) *Engine {
 	if pathway == nil {
 		panic("pathwalk: NewEngine called with nil pathway")
 	}
 	if llm == nil {
-		panic("pathwalk: NewEngine called with nil llm")
+		if len(pathway.Providers) == 0 {
+			panic("pathwalk: NewEngine called with nil llm and pathway has no providers configured")
+		}
+		llm = NewRoutingClient(pathway.Providers)
 	}
 	e := &Engine{
 		pathway:         pathway,
@@ -108,6 +124,25 @@ func NewState(task string) *State {
 //	    nodeID = result.NextNodeID
 //	}
 func (e *Engine) Step(ctx context.Context, state *State, nodeID string) (*StepResult, error) {
+	stepStart := time.Now()
+	stepsBefore := len(state.Steps)
+
+	// enrichLastStep stamps timing and a state snapshot onto the step that was
+	// appended during this call. Called via defer so every return path is covered.
+	enrichLastStep := func() {
+		if len(state.Steps) <= stepsBefore {
+			return // no step was appended (e.g. missing_node)
+		}
+		last := &state.Steps[len(state.Steps)-1]
+		last.StartedAt = stepStart
+		last.DurationMs = int(time.Since(stepStart).Milliseconds())
+		last.StateSnapshot = make(map[string]any, len(state.Variables))
+		for k, v := range state.Variables {
+			last.StateSnapshot[k] = v
+		}
+	}
+	defer enrichLastStep()
+
 	lc := newLogCapture(e.log.Handler())
 	stepLog := slog.New(lc)
 
@@ -445,6 +480,10 @@ func (e *Engine) Run(ctx context.Context, task string) (*RunResult, error) {
 		result, _ := e.Step(ctx, state, nodeID) // Step never returns a non-nil error
 		allLogs = append(allLogs, result.Logs...)
 
+		for _, cb := range e.stepCallbacks {
+			cb(result)
+		}
+
 		// Checkpoint suspension: Run() cannot continue without external input.
 		if result.WaitCondition != nil {
 			return &RunResult{
@@ -487,6 +526,20 @@ func (e *Engine) Run(ctx context.Context, task string) (*RunResult, error) {
 // nodeID must be the checkpoint node that suspended (WaitCondition.NodeID).
 // The response is applied to state, and the engine routes to the next node.
 func (e *Engine) ResumeStep(ctx context.Context, state *State, nodeID string, response CheckpointResponse) (*StepResult, error) {
+	resumeStart := time.Now()
+	stepsBefore := len(state.Steps)
+	defer func() {
+		if len(state.Steps) > stepsBefore {
+			last := &state.Steps[len(state.Steps)-1]
+			last.StartedAt = resumeStart
+			last.DurationMs = int(time.Since(resumeStart).Milliseconds())
+			last.StateSnapshot = make(map[string]any, len(state.Variables))
+			for k, v := range state.Variables {
+				last.StateSnapshot[k] = v
+			}
+		}
+	}()
+
 	node, ok := e.pathway.NodeByID[nodeID]
 	if !ok {
 		return nil, fmt.Errorf("node %q not found in pathway", nodeID)

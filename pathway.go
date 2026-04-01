@@ -8,12 +8,15 @@ import (
 
 // pathwayJSON mirrors the top-level structure of a pathway JSON file.
 type pathwayJSON struct {
-	Nodes             []nodeJSON        `json:"nodes"`
-	Edges             []edgeJSON        `json:"edges"`
-	GraphQLEndpoint   string            `json:"graphqlEndpoint"`
-	GraphQLEndpoints  map[string]string `json:"graphqlEndpoints"`
-	MaxTurns          int               `json:"maxTurns"`
-	MaxVisitsPerNode  int               `json:"maxVisitsPerNode"`
+	Nodes                   []nodeJSON            `json:"nodes"`
+	Edges                   []edgeJSON            `json:"edges"`
+	GraphQLEndpoint         string               `json:"graphqlEndpoint"`
+	GraphQLEndpoints        map[string]string    `json:"graphqlEndpoints"`
+	GraphQLHeaders          map[string]string    `json:"graphqlHeaders"`
+	GraphQLEndpointHeaders  map[string]map[string]string `json:"graphqlEndpointHeaders"`
+	MaxTurns                int                  `json:"maxTurns"`
+	MaxVisitsPerNode        int                  `json:"maxVisitsPerNode"`
+	Providers               []ProviderConfig     `json:"providers"`
 }
 
 type nodeJSON struct {
@@ -36,6 +39,8 @@ type nodeDataJSON struct {
 
 	ModelOptions struct {
 		NewTemperature float64 `json:"newTemperature"`
+		Model          string  `json:"model"`
+		Provider       string  `json:"provider"`
 	} `json:"modelOptions"`
 
 	// Webhook fields
@@ -247,8 +252,10 @@ type Pathway struct {
 	EdgesFrom        map[string][]*Edge // source nodeID → outgoing edges
 	StartNode        *Node
 	GlobalNodes      []*Node // nodes with IsGlobal == true and a non-empty GlobalLabel
-	GraphQLEndpoint  string            // optional single GraphQL endpoint (unnamed tools)
-	GraphQLEndpoints map[string]string // named endpoints → tools get _<name> suffix
+	GraphQLEndpoint         string                       // optional single GraphQL endpoint (unnamed tools)
+	GraphQLEndpoints        map[string]string            // named endpoints → tools get _<name> suffix
+	GraphQLHeaders          map[string]string            // headers for the default GraphQL endpoint
+	GraphQLEndpointHeaders  map[string]map[string]string // per-named-endpoint headers
 
 	// MaxTurns caps the total number of node-to-node transitions in a run.
 	// 0 means use the engine's WithMaxSteps value (default 50).
@@ -256,6 +263,10 @@ type Pathway struct {
 	// MaxVisitsPerNode is the default per-node visit cap for all nodes in the pathway.
 	// 0 means no limit unless a node's own MaxVisits overrides it.
 	MaxVisitsPerNode int
+	// Providers is the list of LLM provider configs declared in the pathway.
+	// When non-empty and NewEngine is called with a nil LLMClient, the engine
+	// automatically builds a RoutingClient from these providers.
+	Providers []ProviderConfig
 }
 
 // ParsePathway reads a pathway JSON file and returns a Pathway.
@@ -277,10 +288,13 @@ func ParsePathwayBytes(data []byte) (*Pathway, error) {
 	pp := &Pathway{
 		NodeByID:         make(map[string]*Node),
 		EdgesFrom:        make(map[string][]*Edge),
-		GraphQLEndpoint:  raw.GraphQLEndpoint,
-		GraphQLEndpoints: raw.GraphQLEndpoints,
+		GraphQLEndpoint:        raw.GraphQLEndpoint,
+		GraphQLEndpoints:       raw.GraphQLEndpoints,
+		GraphQLHeaders:         raw.GraphQLHeaders,
+		GraphQLEndpointHeaders: raw.GraphQLEndpointHeaders,
 		MaxTurns:         raw.MaxTurns,
 		MaxVisitsPerNode: raw.MaxVisitsPerNode,
+		Providers:        raw.Providers,
 	}
 
 	for _, rn := range raw.Nodes {
@@ -295,6 +309,8 @@ func ParsePathwayBytes(data []byte) (*Pathway, error) {
 			Text:        rn.Data.Text,
 			Condition:   rn.Data.Condition,
 			Temperature: rn.Data.ModelOptions.NewTemperature,
+			Model:       rn.Data.ModelOptions.Model,
+			LLMProvider: rn.Data.ModelOptions.Provider,
 
 			// Terminal node
 			TerminalText: rn.Data.Text,

@@ -59,6 +59,7 @@ export default function Editor({ pathway, onSave }) {
         setDirty(false)
         setSaved(true)
         setTimeout(() => setSaved(false), 2000)
+        onSave?.(content)
       } else {
         setError('Save failed: ' + (data.error || 'unknown error'))
       }

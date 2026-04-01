@@ -204,8 +204,12 @@ func runPathway(pathwaysDir, defaultAPIKey, defaultBaseURL, defaultModel string,
 			return
 		}
 
-		// Create LLM client
-		llm := pathwalk.NewOpenAIClient(req.APIKey, req.BaseURL, req.Model)
+		// Use pathway-level providers when declared; otherwise fall back to request credentials.
+		var llm pathwalk.LLMClient
+		if len(pathway.Providers) == 0 {
+			llm = pathwalk.NewOpenAIClient(req.APIKey, req.BaseURL, req.Model)
+		}
+		// else: llm stays nil — NewEngine auto-builds a RoutingClient from pathway.Providers.
 
 		// Create engine with built-in tools
 		engine := pathwalk.NewEngine(

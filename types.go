@@ -12,7 +12,10 @@
 //	result, err := engine.Run(ctx, "your task description")
 package pathwalk
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // NodeType identifies the kind of node in a pathway.
 type NodeType string
@@ -164,6 +167,8 @@ type Node struct {
 	Condition   string
 	ExtractVars []VariableDef
 	Temperature float64
+	Model       string // overrides the provider's default model for this node
+	LLMProvider string // explicit provider name; empty = auto-route by model name
 
 	// Terminal node
 	TerminalText string
@@ -302,6 +307,11 @@ type Step struct {
 	ResumeValue string
 	// ChildRuns captures execution traces from child agent runs (Agent/Team nodes).
 	ChildRuns []ChildRun
+
+	// Observability fields — populated by the engine after each step.
+	StartedAt     time.Time      `json:"started_at,omitempty"`
+	DurationMs    int            `json:"duration_ms,omitempty"`
+	StateSnapshot map[string]any `json:"state_snapshot,omitempty"`
 }
 
 // ChildRun captures the execution trace of a child agent run.
